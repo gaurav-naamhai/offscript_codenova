@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 from app.models import AuditEvent, Comment, Decision, Flag, Submission
 
-MAX_SUBMISSIONS = 200
+MAX_SUBMISSIONS = 40
 
 
 class SubmissionRepository(ABC):

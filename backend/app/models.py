@@ -82,6 +82,10 @@ class Submission(BaseModel):
     role: str
     status: SubmissionStateType = "draft"
     version: int = 1
+    title: Optional[str] = None
+    audience: Optional[str] = None
+    channel: Optional[str] = None
+    context: Optional[str] = None
     text: Optional[str] = None
     file_name: Optional[str] = None
     file_mime: Optional[str] = None
@@ -96,6 +100,10 @@ class SubmissionListItem(BaseModel):
     content_type: str
     status: str
     version: int
+    title: Optional[str] = None
+    audience: Optional[str] = None
+    channel: Optional[str] = None
+    context: Optional[str] = None
     created_at: str
     flag_count: int
     needs_human_count: int

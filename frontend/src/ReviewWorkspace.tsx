@@ -1,60 +1,569 @@
-import { useEffect, useRef, useState } from 'react'
-import { loadSampleReview, saveSampleReview } from './reviewStore'
-import type { ReviewState } from './reviewStore'
-import type { Draft } from './NewReview'
-import { sampleCorrected, sampleFindings, sampleText } from './sampleReview'
-import type { Finding } from './sampleReview'
+import { useCallback, useEffect, useState } from 'react'
+import { serverApi } from './serverApi'
+import type { AuditEvent, RecheckResult, ServerDetail, ServerFlag, VersionInfo } from './serverApi'
 import './ReviewWorkspace.css'
 
-type Decision = 'open' | 'applied' | 'dismissed'
-type Snapshot = { text: string; decisions: Record<Finding['id'], Decision>; stale: boolean; edits: string[] }
-const initialDecisions: Record<Finding['id'], Decision> = { brand: 'open', claim: 'open' }
-function Content({ draft, text, url, selected, sample }: { draft: Draft; text: string; url: string; selected: Finding | undefined; sample: boolean }) {
-  if (draft.format === 'Image') return url ? <img className="workspace-image" src={url} alt={`Submitted image: ${draft.title}`}/> : <p>Image preview unavailable.</p>
-  if (draft.format === 'PDF') return url ? <><object className="pdf-preview" data={url} type="application/pdf" aria-label="Submitted PDF"><p>PDF preview unavailable. <a href={url} target="_blank" rel="noreferrer">Open PDF</a>.</p></object><a href={url} target="_blank" rel="noreferrer">Open PDF file</a></> : <p>PDF preview unavailable.</p>
-  const start = selected?.start ?? -1
-  const match = sample && selected && text.slice(start, start + selected.excerpt.length) === selected.excerpt
-  return <p className="workspace-text">{match ? <>{text.slice(0, start)}<mark>{selected.excerpt}</mark>{text.slice(start + selected.excerpt.length)}</> : text}</p>
-}
-export default function ReviewWorkspace({ submitted, file, url, onReturn, onUpdateText, savedReview, onPersist }: { submitted: Draft; file: File | null; url: string; onReturn: () => void; onUpdateText: (text: string) => void; savedReview?: ReviewState; onPersist: (review: ReviewState) => void }) {
-  const [sample, setSample] = useState(false)
-  const [original, setOriginal] = useState(savedReview?.original ?? (submitted.format === 'Text' ? submitted.text : ''))
-  const [state, setState] = useState<Snapshot>({ text: savedReview?.text ?? (submitted.format === 'Text' ? submitted.text : ''), decisions: initialDecisions, stale: savedReview?.stale ?? false, edits: savedReview?.edits ?? [] })
-  const [undo, setUndo] = useState<Snapshot[]>([])
-  const [selectedId, setSelectedId] = useState<Finding['id'] | null>(null)
+export default function ReviewWorkspace({
+  submissionId,
+  onReturn,
+  onNewReview,
+  onRefreshList,
+}: {
+  submissionId: string
+  onReturn: () => void
+  onNewReview?: () => void
+  onRefreshList?: () => void
+}) {
+  const [detail, setDetail] = useState<ServerDetail | null>(null)
+  const [versions, setVersions] = useState<VersionInfo[]>([])
+  const [audit, setAudit] = useState<AuditEvent[]>([])
+  const [fileUrl, setFileUrl] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'All' | 'Brand' | 'Claims'>('All')
-  const [view, setView] = useState<'Original' | 'Revised'>(savedReview && savedReview.original !== savedReview.text ? 'Revised' : 'Original')
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
-  const [comments, setComments] = useState<string[]>(savedReview?.comments ?? [])
-  const [comment, setComment] = useState('')
-  const [activity, setActivity] = useState<string[]>(savedReview?.activity ?? ['Workspace opened.'])
+  const [commentText, setCommentText] = useState('')
+  const [decisionComment, setDecisionComment] = useState('')
+  const [recheckPreview, setRecheckPreview] = useState<{ flagId: string; result: RecheckResult } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const persistRef = useRef(onPersist)
-  persistRef.current = onPersist
-  useEffect(() => { if (!sample) persistRef.current({ original, text: state.text, stale: state.stale, edits: state.edits, comments, activity }); else { const error = saveSampleReview({ original, text: state.text, stale: state.stale, edits: state.edits, decisions: state.decisions, comments, activity }); if (error) setNotice(error) } }, [sample, original, state, comments, activity])
-  const displayDraft: Draft = sample ? { ...submitted, format: 'Text', title: 'Summer campaign email', text: sampleText, context: 'Illustrative demo content' } : submitted
-  const known = sample && (state.text === sampleText || state.text === sampleCorrected)
-  const findings = sample ? sampleFindings.filter(f => !(known && !state.stale && state.text === sampleCorrected && f.id === 'brand')) : []
-  const visible = findings.filter(f => filter === 'All' || f.category === filter)
-  const selected = findings.find(f => f.id === selectedId)
-  function record(message: string) { setActivity(previous => [message, ...previous]) }
-  function loadSample() {
-    const { review, error } = loadSampleReview()
-    setSample(true); setOriginal(review?.original ?? sampleText)
-    setState(review ? { text: review.text, decisions: review.decisions, stale: review.stale, edits: review.edits } : { text: sampleText, decisions: { ...initialDecisions }, stale: false, edits: [] })
-    setComments(review?.comments ?? []); setActivity(review?.activity ?? ['Sample review opened.'])
-    setUndo([]); setSelectedId(null); setView(review && review.text !== review.original ? 'Revised' : 'Original'); setFilter('All'); setEditing(false)
-    setNotice(error || (review ? 'Restored the local sample review, separate from your submitted draft.' : 'Sample loaded. It does not replace your submitted draft.'))
+
+  const loadData = useCallback(async () => {
+    try {
+      setError('')
+      const [d, v, a] = await Promise.all([
+        serverApi.detail(submissionId),
+        serverApi.versions(submissionId).catch(() => []),
+        serverApi.audit(submissionId).catch(() => []),
+      ])
+      setDetail(d)
+      setVersions(v)
+      setAudit(a)
+      setEditValue(d.submission.text || '')
+
+      if (d.submission.content_type !== 'text') {
+        try {
+          const blob = await serverApi.file(submissionId, d.submission.content_type)
+          setFileUrl(URL.createObjectURL(blob))
+        } catch {
+          // File preview unavailable
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load submission.')
+    } finally {
+      setLoading(false)
+    }
+  }, [submissionId])
+
+  useEffect(() => {
+    void loadData()
+  }, [loadData])
+
+  useEffect(() => {
+    return () => {
+      if (fileUrl) URL.revokeObjectURL(fileUrl)
+    }
+  }, [fileUrl])
+
+  async function handleResolve(flag: ServerFlag, action: 'accept' | 'dismiss') {
+    setBusy(action === 'accept' ? 'Applying suggested correction...' : 'Dismissing finding...')
+    setError('')
+    setNotice('')
+    try {
+      await serverApi.resolve(submissionId, flag.id, action, 'creator')
+      await loadData()
+      onRefreshList?.()
+      setNotice(action === 'accept' ? 'Suggested correction applied to text.' : 'Finding dismissed.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Resolution action failed.')
+    } finally {
+      setBusy('')
+    }
   }
-  function apply(finding: Finding) {
-    if (!sample || state.stale || state.decisions[finding.id] !== 'open' || !finding.replacement || state.text.slice(finding.start, finding.start + finding.excerpt.length) !== finding.excerpt) return
-    setUndo(previous => [...previous, state]); setState(previous => ({ ...previous, text: previous.text.slice(0, finding.start) + finding.replacement + previous.text.slice(finding.start + finding.excerpt.length), decisions: { ...previous.decisions, [finding.id]: 'applied' }, stale: true, edits: [...previous.edits, `${finding.excerpt} → ${finding.replacement}`] })); setView('Revised'); setNotice('Draft changed. Results are stale; recheck required. This is not approval.'); record(`Applied sample suggestion: ${finding.excerpt} → ${finding.replacement}.`)
+
+  async function handleRecheck(flag: ServerFlag) {
+    setBusy('Running recheck simulation on candidate text...')
+    setError('')
+    try {
+      const result = await serverApi.recheck(submissionId, flag.id, 'creator')
+      setRecheckPreview({ flagId: flag.id, result })
+      setNotice('Recheck preview computed: see results below finding.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Recheck failed.')
+    } finally {
+      setBusy('')
+    }
   }
-  function dismiss(finding: Finding) { if (state.decisions[finding.id] !== 'open' || state.stale) return; setUndo(previous => [...previous, state]); setState(previous => ({ ...previous, decisions: { ...previous.decisions, [finding.id]: 'dismissed' } })); record(`Dismissed ${finding.title}; draft unchanged.`); setNotice('Finding dismissed; the draft was not changed.') }
-  function undoLast() { const previous = undo[undo.length - 1]; if (!previous) return; setState(previous); setUndo(items => items.slice(0, -1)); setView('Revised'); setNotice('Last change or decision undone.'); record('Undid the last change or decision.'); if (!sample) onUpdateText(previous.text) }
-  function saveEdit() { if (editValue !== state.text) { setUndo(previous => [...previous, state]); setState(previous => ({ ...previous, text: editValue, stale: true, edits: [...previous.edits, 'Manual draft edit'] })); if (!sample) onUpdateText(editValue); record('Draft edited manually.'); setNotice('Draft changed. Results are stale; recheck required.') } setEditing(false); setView('Revised') }
-  function recheck() { if (!sample || !known) { setNotice('Demo recheck only supports the exact sample and its suggested correction. This draft remains unreviewed.'); return } setState(previous => ({ ...previous, stale: false, decisions: { ...initialDecisions } })); setSelectedId(null); setNotice('Simulated sample recheck only: known sample text was compared. No AI was called, and no approval was granted.'); record('Simulated a recheck of the known sample.') }
-  const displayed = view === 'Original' ? original : state.text
-  return <div className="review-workspace"><header className="workspace-intro"><div><span className="workspace-kicker">DEMO DATA — not live AI analysis</span><h1>Every detail, explained.</h1><p>{displayDraft.title} · {sample ? 'Sample review' : 'Submitted draft'}</p></div><button type="button" className="workspace-outline" onClick={loadSample}>Load sample review</button></header><div className="workspace-banner">{sample ? `${findings.length} sample findings · Brand: ${findings.filter(f => f.category === 'Brand').length} · Claims: ${findings.filter(f => f.category === 'Claims').length}` : 'AI review not connected — this submission has not been analyzed.'}<span> No content is sent to external services.</span></div>{notice && <p className="workspace-notice" role="status">{notice}</p>}<div className="workspace-grid"><section className="panel workspace-panel"><h2>Your draft</h2><div className="workspace-toolbar"><span className="format-badge">{displayDraft.format}</span><div className="workspace-tabs" role="group" aria-label="Draft version">{(['Original', 'Revised'] as const).map(item => <button type="button" aria-pressed={view === item} className={view === item ? 'selected' : ''} onClick={() => setView(item)} key={item}>{item}</button>)}</div></div><div className="workspace-paper"><h3>{displayDraft.title}</h3>{editing ? <><label htmlFor="workspace-edit">Edit draft text</label><textarea id="workspace-edit" value={editValue} onChange={event => setEditValue(event.target.value)} rows={10}/><div className="workspace-actions"><button type="button" onClick={saveEdit}>Save edit</button><button type="button" onClick={() => setEditing(false)}>Cancel</button></div></> : <Content draft={displayDraft} text={displayed} url={sample ? '' : url} selected={selected} sample={sample}/>} {selected && displayDraft.format === 'Text' && displayed.slice(selected.start, selected.start + selected.excerpt.length) !== selected.excerpt && <p className="workspace-muted">Finding location unavailable in this version.</p>}{displayDraft.format !== 'Text' && <p className="workspace-muted">Finding location unavailable: no image or PDF coordinates are provided. Automatic editing is unavailable.</p>}{file && !sample && <p className="workspace-muted">{file.name}</p>}</div>{displayDraft.context && <p><strong>Context:</strong> {displayDraft.context}</p>}<div className="changes"><h3>Changes</h3>{state.edits.length ? <ul>{state.edits.map((edit, index) => <li key={index}>{edit}</li>)}</ul> : <p>No edits applied yet.</p>}<div className="workspace-actions">{displayDraft.format === 'Text' && <button type="button" onClick={() => { setEditValue(state.text); setEditing(true) }}>Edit draft</button>}<button type="button" onClick={undoLast} disabled={!undo.length}>Undo last action</button></div></div><details><summary>Before / after comparison</summary><h4>Original</h4><p className="workspace-text">{original || (displayDraft.format === 'Text' ? 'No text.' : 'File content is unchanged.')}</p><h4>Revised</h4><p className="workspace-text">{state.text || (displayDraft.format === 'Text' ? 'No text.' : 'File content is unchanged.')}</p></details></section><section className="panel workspace-panel"><h2>Findings &amp; evidence</h2><div className="workspace-tabs" role="group" aria-label="Filter findings">{(['All', 'Brand', 'Claims'] as const).map(item => <button type="button" aria-pressed={filter === item} className={filter === item ? 'selected' : ''} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div>{state.stale && <p className="stale-label">Results stale — recheck required. Existing findings may no longer match.</p>}{!sample ? <p>AI review not connected. No findings or checks have been generated for this draft.</p> : !visible.length ? <p>No sample findings in this filter. This is not an approval.</p> : visible.map(f => <article className="finding" key={f.id}><button className="finding-select" type="button" aria-expanded={selectedId === f.id} onClick={() => { setSelectedId(f.id); if (!state.stale) setView('Original') }}><strong>{f.title}</strong><span>{f.category} · {f.assessment}</span></button>{selectedId === f.id && <div className="finding-detail"><p><strong>Assessment:</strong> {f.assessment}</p><p><strong>Human decision:</strong> {state.decisions[f.id]}</p><p><strong>Affected text:</strong> {f.excerpt}</p><p>{f.explanation}</p><p className="source-excerpt"><strong>Source excerpt:</strong> {f.source} {f.sourceUrl && <a href={f.sourceUrl} target="_blank" rel="noreferrer">Official source</a>} <em>(sample review)</em></p>{f.replacement && <p><strong>Before / after:</strong> {f.excerpt} → {f.replacement}</p>}<div className="workspace-actions">{f.replacement && <button type="button" onClick={() => apply(f)} disabled={state.stale || state.decisions[f.id] !== 'open'}>Apply suggestion</button>}<button type="button" onClick={() => dismiss(f)} disabled={state.stale || state.decisions[f.id] !== 'open'}>Dismiss</button></div></div>}</article>)}<section className="local-records"><h3>Comments</h3><p className="workspace-muted">Local demo records only, not a secure audit log.</p><label htmlFor="comment">Add a comment</label><textarea id="comment" value={comment} onChange={event => setComment(event.target.value)} rows={2}/><button type="button" onClick={() => { if (comment.trim()) { setComments(previous => [...previous, comment.trim()]); record('Added a local comment.'); setComment('') } }}>Add comment</button>{comments.length > 0 && <ul>{comments.map((item, index) => <li key={index}>{item}</li>)}</ul>}<h3>Session activity</h3><ul>{activity.map((item, index) => <li key={index}>{item}</li>)}</ul></section></section></div><div className="workspace-footer"><span>Approval and backend review are unavailable.</span><div className="workspace-actions"><button type="button" onClick={recheck}>Preview demo recheck</button><button type="button" onClick={onReturn}>Return to submission</button></div></div></div>
+
+  async function handleSaveEdit() {
+    if (!detail) return
+    setBusy('Updating draft text...')
+    setError('')
+    try {
+      await serverApi.revise(
+        submissionId,
+        'text',
+        editValue,
+        null,
+        detail.submission.title || undefined,
+        detail.submission.audience || undefined,
+        detail.submission.channel || undefined,
+        detail.submission.context || undefined
+      )
+      setEditing(false)
+      await loadData()
+      onRefreshList?.()
+      setNotice('Draft revised. Run compliance check to re-evaluate.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update draft.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function handleAddComment() {
+    if (!commentText.trim()) return
+    setBusy('Adding review comment...')
+    setError('')
+    try {
+      await serverApi.comment(submissionId, 'creator', commentText.trim())
+      setCommentText('')
+      await loadData()
+      setNotice('Comment recorded in audit log.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to add comment.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function handleCheck() {
+    setBusy('Running brand guideline & claim verification checks...')
+    setError('')
+    try {
+      await serverApi.check(submissionId)
+      await loadData()
+      onRefreshList?.()
+      setNotice('Compliance check completed. Submission moved to Manager Review.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Check pipeline failed.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function handleDecision(role: 'manager' | 'authorised_reviewer', decision: 'approve' | 'request_changes') {
+    const actionLabel = decision === 'approve'
+      ? (role === 'manager' ? 'Recording Manager approval...' : 'Granting Authorised Reviewer sign-off...')
+      : 'Requesting revisions from creator...'
+    setBusy(actionLabel)
+    setError('')
+    try {
+      await serverApi.decide(submissionId, role, decision, decisionComment.trim())
+      setDecisionComment('')
+      await loadData()
+      onRefreshList?.()
+      setNotice(
+        decision === 'approve'
+          ? (role === 'manager' ? 'Manager approval granted. Ready for final reviewer sign-off.' : 'Final legal & brand approval granted. Publication authorized.')
+          : 'Changes requested. Submission returned to creator as draft (version bumped).'
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to record decision.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="review-workspace">
+        <p className="workspace-notice" role="status">Loading review workspace from server...</p>
+      </div>
+    )
+  }
+
+  if (!detail) {
+    return (
+      <div className="review-workspace">
+        <p className="workspace-notice" role="alert">{error || 'Submission not found.'}</p>
+        <button type="button" className="workspace-outline" onClick={onReturn}>Back to review library</button>
+      </div>
+    )
+  }
+
+  const sub = detail.submission
+  const flags = detail.flags
+  const visibleFlags = flags.filter(f => filter === 'All' || (filter === 'Brand' ? f.finding_type === 'brand' : f.finding_type === 'claim'))
+  const selectedFlag = flags.find(f => f.id === selectedId)
+
+  return (
+    <div className="review-workspace">
+      <header className="workspace-intro">
+        <div>
+          <span className="workspace-kicker">COMPLIANCE REVIEW WORKSPACE</span>
+          <h1>{sub.title || 'Untitled submission'}</h1>
+          <p>
+            Format: <strong>{sub.content_type.toUpperCase()}</strong> · Status:{' '}
+            <strong style={{ color: sub.status === 'approved' ? '#6be092' : '#dec9f2' }}>
+              {sub.status.replace('_', ' ').toUpperCase()}
+            </strong>{' '}
+            · Version <strong>v{sub.version}</strong>
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          {onNewReview && (
+            <button type="button" className="workspace-outline" onClick={onNewReview}>
+              New review
+            </button>
+          )}
+          <button type="button" className="workspace-outline" onClick={onReturn}>
+            Review library
+          </button>
+        </div>
+      </header>
+
+      {busy && <div className="workspace-banner" role="status">{busy}</div>}
+      {notice && <p className="workspace-notice" role="status">{notice}</p>}
+      {error && <div className="workspace-notice" role="alert" style={{ background: '#45181b', color: '#ffc5c8' }}>{error}</div>}
+
+      <div className="workspace-grid">
+        {/* Left column: Submitted Draft & Context */}
+        <section className="panel workspace-panel">
+          <h2>Your draft</h2>
+          <div className="workspace-toolbar">
+            <span className="format-badge">{sub.content_type.toUpperCase()}</span>
+            <span className="format-badge" style={{ background: '#f5e4d5', color: '#422115' }}>
+              v{sub.version}
+            </span>
+          </div>
+
+          <div className="workspace-paper">
+            <h3>{sub.title || 'Untitled submission'}</h3>
+            {editing ? (
+              <>
+                <label htmlFor="workspace-edit">Edit draft text</label>
+                <textarea
+                  id="workspace-edit"
+                  value={editValue}
+                  onChange={e => setEditValue(e.target.value)}
+                  rows={10}
+                  disabled={!!busy}
+                />
+                <div className="workspace-actions">
+                  <button type="button" onClick={handleSaveEdit} disabled={!!busy}>Save edit</button>
+                  <button type="button" onClick={() => setEditing(false)} disabled={!!busy}>Cancel</button>
+                </div>
+              </>
+            ) : sub.content_type === 'text' ? (
+              <p className="workspace-text">
+                {selectedFlag && selectedFlag.passage && sub.text?.includes(selectedFlag.passage) ? (
+                  <>
+                    {sub.text.slice(0, sub.text.indexOf(selectedFlag.passage))}
+                    <mark>{selectedFlag.passage}</mark>
+                    {sub.text.slice(sub.text.indexOf(selectedFlag.passage) + selectedFlag.passage.length)}
+                  </>
+                ) : (
+                  sub.text || 'No text content.'
+                )}
+              </p>
+            ) : fileUrl ? (
+              sub.content_type === 'image' ? (
+                <img className="workspace-image" src={fileUrl} alt={sub.file_name || 'Uploaded image'} />
+              ) : (
+                <object className="pdf-preview" data={fileUrl} type="application/pdf" aria-label="PDF preview">
+                  <p>PDF preview is unavailable. <a href={fileUrl} target="_blank" rel="noreferrer">Open PDF</a>.</p>
+                </object>
+              )
+            ) : (
+              <p className="workspace-muted">File: {sub.file_name || 'Binary asset uploaded'}</p>
+            )}
+          </div>
+
+          {sub.content_type === 'text' && sub.status === 'draft' && !editing && (
+            <div className="workspace-actions" style={{ marginTop: '12px' }}>
+              <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }}>
+                Edit draft
+              </button>
+            </div>
+          )}
+
+          {(sub.audience || sub.channel || sub.context) && (
+            <div className="changes" style={{ marginTop: '16px' }}>
+              <h3>Governance context</h3>
+              {sub.audience && <p><strong>Audience:</strong> {sub.audience}</p>}
+              {sub.channel && <p><strong>Purpose / Channel:</strong> {sub.channel}</p>}
+              {sub.context && <p><strong>Notes:</strong> {sub.context}</p>}
+            </div>
+          )}
+
+          {/* Version and Audit History details */}
+          <details className="workspace-panel" style={{ marginTop: '16px', background: 'transparent', padding: '8px 0' }}>
+            <summary>Version &amp; Audit Trail ({audit.length} events)</summary>
+            {versions.length > 0 && (
+              <div style={{ marginTop: '8px' }}>
+                <h4>Recorded versions</h4>
+                <ul>
+                  {versions.map(v => (
+                    <li key={v.version}>
+                      Version {v.version}: {v.flag_count} findings ({v.needs_human_count} require human attention)
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {audit.length > 0 && (
+              <div style={{ marginTop: '8px' }}>
+                <h4>Audit timeline</h4>
+                <ul style={{ fontSize: '13px', lineHeight: '1.5' }}>
+                  {audit.map((evt, idx) => (
+                    <li key={idx}>
+                      <span style={{ color: '#6d5b56' }}>{new Date(evt.timestamp).toLocaleTimeString()}</span> ·{' '}
+                      <strong>{evt.actor || evt.actor_role}</strong> — {evt.action}: {evt.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </details>
+        </section>
+
+        {/* Right column: Findings & Evidence */}
+        <section className="panel workspace-panel">
+          <h2>Findings &amp; evidence</h2>
+          <div className="workspace-tabs" role="group" aria-label="Filter findings">
+            {(['All', 'Brand', 'Claims'] as const).map(tab => (
+              <button
+                type="button"
+                aria-pressed={filter === tab}
+                className={filter === tab ? 'selected' : ''}
+                onClick={() => setFilter(tab)}
+                key={tab}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          {flags.length === 0 ? (
+            <p style={{ marginTop: '16px' }}>
+              {sub.status === 'draft'
+                ? 'No checks run yet. Click "Run Compliance Check" below to evaluate.'
+                : 'Zero findings recorded for this submission.'}
+            </p>
+          ) : visibleFlags.length === 0 ? (
+            <p style={{ marginTop: '16px' }}>No findings match the "{filter}" filter.</p>
+          ) : (
+            visibleFlags.map(f => (
+              <article className="finding" key={f.id}>
+                <button
+                  className="finding-select"
+                  type="button"
+                  aria-expanded={selectedId === f.id}
+                  onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
+                >
+                  <strong>{f.finding_type.toUpperCase()}: {f.state.replace('_', ' ')}</strong>
+                  <span>{f.status.toUpperCase()}</span>
+                </button>
+
+                {selectedId === f.id && (
+                  <div className="finding-detail">
+                    <p><strong>Explanation:</strong> {f.explanation}</p>
+                    <p><strong>Why it matters:</strong> {f.why_it_matters}</p>
+                    {f.passage && (
+                      <p>
+                        <strong>Passage:</strong> <mark>{f.passage}</mark> · <small>{f.location}</small>
+                      </p>
+                    )}
+                    {f.guideline_ref && (
+                      <p className="source-excerpt">
+                        <strong>Guideline violated:</strong> {f.guideline_ref.document} ({f.guideline_ref.passage_ref})<br/>
+                        <em>"{f.guideline_ref.excerpt}"</em>
+                      </p>
+                    )}
+                    {f.external_sources && f.external_sources.length > 0 && (
+                      <div className="source-excerpt">
+                        <strong>External evidence:</strong>
+                        {f.external_sources.map((s, sIdx) => (
+                          <div key={sIdx}>
+                            <a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>: "{s.excerpt}"
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {f.suggested_correction && (
+                      <p><strong>Suggested correction:</strong> {f.suggested_correction}</p>
+                    )}
+
+                    <div className="workspace-actions">
+                      {f.status === 'open' && (
+                        <>
+                          {f.suggested_correction && sub.content_type === 'text' && (
+                            <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>
+                              Apply suggestion
+                            </button>
+                          )}
+                          <button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>
+                            Dismiss
+                          </button>
+                          {sub.content_type === 'text' && (
+                            <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>
+                              Preview recheck
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {recheckPreview && recheckPreview.flagId === f.id && (
+                      <div className="source-excerpt" style={{ marginTop: '10px' }}>
+                        <strong>Recheck Simulation Result:</strong>
+                        <p>
+                          Original issue resolved:{' '}
+                          <strong>{recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</strong>
+                        </p>
+                        <p>
+                          Remaining findings: {recheckPreview.result.new_flags.length} (
+                          {recheckPreview.result.has_needs_human ? 'Requires human review' : 'Aligned'}
+                          )
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </article>
+            ))
+          )}
+
+          {/* Comments section */}
+          <section className="local-records">
+            <h3>Review Comments</h3>
+            <label htmlFor="comment">Add review feedback</label>
+            <textarea
+              id="comment"
+              value={commentText}
+              onChange={e => setCommentText(e.target.value)}
+              rows={2}
+              placeholder="Leave feedback or guidance for creators/approvers..."
+              disabled={!!busy}
+            />
+            <button
+              type="button"
+              onClick={handleAddComment}
+              disabled={!commentText.trim() || !!busy}
+            >
+              Post comment
+            </button>
+
+            {detail.comments && detail.comments.length > 0 && (
+              <ul style={{ marginTop: '12px' }}>
+                {detail.comments.map(c => (
+                  <li key={c.id}>
+                    <strong>{c.role}</strong> (v{c.version}): {c.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </section>
+      </div>
+
+      {/* Streamlined One-Click Role Approvals in Footer */}
+      <div className="workspace-footer">
+        <div>
+          <span>Workflow governance status: <strong>{sub.status.replace('_', ' ').toUpperCase()}</strong></span>
+        </div>
+
+        <div className="workspace-actions">
+          {sub.status === 'draft' && (
+            <button
+              type="button"
+              onClick={handleCheck}
+              disabled={!!busy}
+              style={{ background: '#dec9f2', fontWeight: 700 }}
+            >
+              Run Compliance Check →
+            </button>
+          )}
+
+          {sub.status === 'manager_review' && (
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                placeholder="Optional manager approval notes..."
+                value={decisionComment}
+                onChange={e => setDecisionComment(e.target.value)}
+                style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #b8aaa4' }}
+                disabled={!!busy}
+              />
+              <button
+                type="button"
+                onClick={() => handleDecision('manager', 'approve')}
+                disabled={!!busy}
+                style={{ background: '#dec9f2', fontWeight: 700 }}
+              >
+                Approve as Manager
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDecision('manager', 'request_changes')}
+                disabled={!!busy}
+              >
+                Request Changes
+              </button>
+            </div>
+          )}
+
+          {sub.status === 'final_approval' && (
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                placeholder="Optional final sign-off notes..."
+                value={decisionComment}
+                onChange={e => setDecisionComment(e.target.value)}
+                style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #b8aaa4' }}
+                disabled={!!busy}
+              />
+              <button
+                type="button"
+                onClick={() => handleDecision('authorised_reviewer', 'approve')}
+                disabled={!!busy}
+                style={{ background: '#6be092', color: '#13351d', fontWeight: 700 }}
+              >
+                Final Sign-Off (Authorised Reviewer)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDecision('authorised_reviewer', 'request_changes')}
+                disabled={!!busy}
+              >
+                Request Changes
+              </button>
+            </div>
+          )}
+
+          {sub.status === 'approved' && (
+            <span
+              style={{
+                background: '#6be092',
+                color: '#13351d',
+                padding: '8px 16px',
+                borderRadius: '8px',
+                fontWeight: 700,
+              }}
+            >
+              ✓ Publication Approved
+            </span>
+          )}
+
+          <button type="button" onClick={onReturn}>
+            Return to library
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }

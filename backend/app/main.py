@@ -1,6 +1,7 @@
 """FastAPI Application for Inkloom AI compliance governance."""
 
 from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 from typing import List, Optional, Set
@@ -180,11 +181,90 @@ def create_app(
     app_settings = settings or Settings()
     app_repo = repo or get_repository(app_settings.repo_backend)
 
+    async def _seed_data() -> List[Submission]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        seeds = [
+            (
+                "Summer Campaign Announcement",
+                "Small business owners",
+                "Marketing email",
+                "Reviewing new promotional email draft for tone consistency and claim accuracy.",
+                "draft",
+                "Inkloom AI helps distributed marketing teams prevent brand violations.",
+                False,
+                False,
+            ),
+            (
+                "Enterprise SLA Performance Sheet",
+                "Enterprise IT buyers",
+                "Website",
+                "Checking uptime and performance claims against verified SLA standards.",
+                "manager_review",
+                "Industry-leading 99.9% uptime SLA with real-time audit logging.",
+                True,
+                False,
+            ),
+            (
+                "Q4 Brand Governance Overview",
+                "Brand & legal stakeholders",
+                "Social media",
+                "Approved executive summary of compliance achievements.",
+                "approved",
+                "Trusted compliance automation for enterprise publishing.",
+                True,
+                True,
+            ),
+        ]
+        seeded: List[Submission] = []
+        for idx, (title, audience, channel, context, st, txt, run_pipe, do_dec) in enumerate(seeds, 1):
+            sub = Submission(
+                id=str(uuid.uuid4()),
+                content_type="text",
+                role="creator",
+                status=st,
+                version=1,
+                title=title,
+                audience=audience,
+                channel=channel,
+                context=context,
+                text=txt,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            await app_repo.create_submission(sub)
+            await record_audit(
+                app_repo, sub.id, "creator", "created",
+                f"Demo submission {idx} created" + (f" ({st})" if st == "draft" else ""),
+                timestamp=now_iso,
+            )
+            if run_pipe:
+                fl, _ = run_pipeline(ContentPayload(content_type="text", text=txt), sub.id, 1)
+                await app_repo.set_flags(sub.id, fl, 1)
+                await record_audit(app_repo, sub.id, "creator", "check_completed", f"Check completed with {len(fl)} flags", timestamp=now_iso)
+            if do_dec:
+                d1 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="manager", decision="approve", comment="Brand voice aligned.", version=1, created_at=now_iso)
+                d2 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="authorised_reviewer", decision="approve", comment="Final legal sign-off granted.", version=1, created_at=now_iso)
+                await app_repo.add_decision(d1)
+                await app_repo.add_decision(d2)
+                await record_audit(app_repo, sub.id, "manager", "decision_recorded", "Manager approved", timestamp=now_iso)
+                await record_audit(app_repo, sub.id, "authorised_reviewer", "decision_recorded", "Authorised reviewer approved", timestamp=now_iso)
+            seeded.append(sub)
+        return seeded
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if app_settings.demo_mode:
+            existing = await app_repo.list_submissions()
+            if not existing:
+                await _seed_data()
+        yield
+
     app = FastAPI(
         title="Inkloom Compliance API",
         version="1.0.0",
         docs_url="/docs",
         openapi_url="/openapi.json",
+        lifespan=lifespan,
     )
     app.state.settings = app_settings
     app.state.repo = app_repo
@@ -233,6 +313,10 @@ def create_app(
                     content_type=sub.content_type,
                     status=sub.status,
                     version=sub.version,
+                    title=sub.title,
+                    audience=sub.audience,
+                    channel=sub.channel,
+                    context=sub.context,
                     created_at=sub.created_at,
                     flag_count=len(flags),
                     needs_human_count=sum(1 for f in flags if f.needs_human),
@@ -244,6 +328,10 @@ def create_app(
     async def create_submission(
         content_type: str = Form(...),
         role: str = Form(...),
+        title: Optional[str] = Form(None),
+        audience: Optional[str] = Form(None),
+        channel: Optional[str] = Form(None),
+        context: Optional[str] = Form(None),
         text: Optional[str] = Form(None),
         file: Optional[UploadFile] = File(None),
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
@@ -261,6 +349,10 @@ def create_app(
             role=role,
             status="draft",
             version=1,
+            title=title.strip() if title and title.strip() else None,
+            audience=audience.strip() if audience and audience.strip() else None,
+            channel=channel.strip() if channel and channel.strip() else None,
+            context=context.strip() if context and context.strip() else None,
             text=cleaned_text,
             file_name=file_name,
             file_mime=file_mime,
@@ -286,6 +378,10 @@ def create_app(
         id: str,
         content_type: str = Form(...),
         role: str = Form(...),
+        title: Optional[str] = Form(None),
+        audience: Optional[str] = Form(None),
+        channel: Optional[str] = Form(None),
+        context: Optional[str] = Form(None),
         text: Optional[str] = Form(None),
         file: Optional[UploadFile] = File(None),
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
@@ -304,6 +400,14 @@ def create_app(
         )
         now_iso = datetime.now(timezone.utc).isoformat()
         sub.content_type = content_type
+        if title is not None:
+            sub.title = title.strip() if title.strip() else None
+        if audience is not None:
+            sub.audience = audience.strip() if audience.strip() else None
+        if channel is not None:
+            sub.channel = channel.strip() if channel.strip() else None
+        if context is not None:
+            sub.context = context.strip() if context.strip() else None
         sub.text = cleaned_text
         sub.file_name = file_name
         sub.file_mime = file_mime
@@ -753,44 +857,7 @@ def create_app(
         """Seed 3 sample submissions for live judging demonstrations."""
         if not app_settings.demo_mode:
             raise HTTPException(403, "Demo mode is disabled. Set DEMO_MODE=true to enable seeding.")
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        seeds = [
-            ("draft", "Inkloom AI helps distributed marketing teams prevent brand violations.", False, False),
-            ("manager_review", "Industry-leading 99.9% uptime SLA with real-time audit logging.", True, False),
-            ("approved", "Trusted compliance automation for enterprise publishing.", True, True),
-        ]
-        seeded: List[Submission] = []
-        for idx, (st, txt, run_pipe, do_dec) in enumerate(seeds, 1):
-            sub = Submission(
-                id=str(uuid.uuid4()),
-                content_type="text",
-                role="creator",
-                status=st,
-                version=1,
-                text=txt,
-                created_at=now_iso,
-                updated_at=now_iso,
-            )
-            await app_repo.create_submission(sub)
-            await record_audit(
-                app_repo, sub.id, "creator", "created",
-                f"Demo submission {idx} created" + (f" ({st})" if st == "draft" else ""),
-                timestamp=now_iso,
-            )
-            if run_pipe:
-                fl, _ = run_pipeline(ContentPayload(content_type="text", text=txt), sub.id, 1)
-                await app_repo.set_flags(sub.id, fl, 1)
-                await record_audit(app_repo, sub.id, "creator", "check_completed", f"Check completed with {len(fl)} flags", timestamp=now_iso)
-            if do_dec:
-                d1 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="manager", decision="approve", comment="Brand voice aligned.", version=1, created_at=now_iso)
-                d2 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="authorised_reviewer", decision="approve", comment="Final legal sign-off granted.", version=1, created_at=now_iso)
-                await app_repo.add_decision(d1)
-                await app_repo.add_decision(d2)
-                await record_audit(app_repo, sub.id, "manager", "decision_recorded", "Manager approved", timestamp=now_iso)
-                await record_audit(app_repo, sub.id, "authorised_reviewer", "decision_recorded", "Authorised reviewer approved", timestamp=now_iso)
-            seeded.append(sub)
-
+        seeded = await _seed_data()
         return {"status": "ok", "message": "Demo submissions seeded successfully", "submissions": seeded}
 
     return app
