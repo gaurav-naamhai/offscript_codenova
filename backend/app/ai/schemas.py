@@ -253,6 +253,14 @@ class CorrectionOutput(BaseModel):
     )
 
 
+class SuggestionsOutput(BaseModel):
+    """Collection of corrections for multiple flagged issues in a submission."""
+
+    corrections: List[CorrectionOutput] = Field(
+        default_factory=list, description="List of generated corrections"
+    )
+
+
 # ============================================================================
 # 6. VISUAL & ACCESSIBILITY SCHEMAS
 # ============================================================================
@@ -295,6 +303,16 @@ class VisualAccessibilityOutput(BaseModel):
     accessibility_issues: List[AccessibilityIssue] = Field(
         default_factory=list, description="Detected accessibility hurdles"
     )
+    needs_human: bool = Field(
+        default=False, description="Whether human review is required due to uncertainty or severity"
+    )
+    uncertainty_note: Optional[str] = Field(
+        default=None, description="Explicit uncertainty rationale when guidelines or media are ambiguous"
+    )
+
+    def model_post_init(self, __context):
+        if self.visual_brand_alignment == "unclear" or self.uncertainty_note:
+            self.needs_human = True
 
 
 # ============================================================================

@@ -46,8 +46,21 @@ from app.ai.schemas import (
     GovernanceInsightsOutput,
     PreservedEntity,
     RecurringViolation,
+    SuggestionsOutput,
     SynthesizedFlag,
     VisualAccessibilityOutput,
+)
+from app.ai.suggestions_corrections import (
+    check_entity_preservation,
+    generate_correction,
+    generate_corrections,
+    recheck_correction,
+)
+from app.ai.visual_accessibility import (
+    analyze_visual_accessibility,
+    calculate_contrast_ratio,
+    calculate_relative_luminance,
+    evaluate_wcag_contrast,
 )
 
 __all__ = [
@@ -64,6 +77,14 @@ __all__ = [
     "synthesize_flag_drafts",
     "consolidate_flags",
     "summarize_flag_metrics",
+    "generate_correction",
+    "generate_corrections",
+    "recheck_correction",
+    "check_entity_preservation",
+    "analyze_visual_accessibility",
+    "calculate_contrast_ratio",
+    "calculate_relative_luminance",
+    "evaluate_wcag_contrast",
     # Client & Exceptions
     "GeminiClient",
     "GeminiError",
@@ -83,6 +104,7 @@ __all__ = [
     "FlaggingOutput",
     "SynthesizedFlag",
     "CorrectionOutput",
+    "SuggestionsOutput",
     "VisualAccessibilityOutput",
     "AccessibilityIssue",
     "GovernanceInsightsOutput",
