@@ -6,51 +6,31 @@ FastAPI microservice for autonomous, pre-publication brand compliance reviews, m
 
 ---
 
-## 1. Quickstart & Local Execution (Any OS)
-
-### Prerequisites
-- Python 3.11+ or 3.12+ (tested on Python 3.12 and 3.14)
-- Git
-
-### Linux / macOS (bash / zsh)
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install -r requirements-dev.txt   # for test dependencies
-
-# Run server locally
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+## 1. Quickstart & Local Execution
 
 ### Windows (PowerShell)
 ```powershell
-Set-Location backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install -r requirements-dev.txt   # for test dependencies
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
 
-# Run server locally
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+### Linux / macOS (bash / zsh) *(Not tested locally)*
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements-dev.txt
+./.venv/bin/pytest && ./.venv/bin/uvicorn app.main:app --reload
 ```
 
 Interactive documentation and OpenAPI schema:
-- Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs) (HTTP 200 verified)
-- OpenAPI Specification: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json) (HTTP 200 verified)
+- Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
+- OpenAPI Specification: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
 
 ---
 
-## 2. Docker Execution
+## 2. Docker Execution *(Container build not verified locally)*
 
-Build and run using the included container configuration (`python:3.12-slim`):
-
-```bash
-cd backend
-docker build -t offscript-compliance-backend .
-docker run -p 8000:8000 --env-file .env offscript-compliance-backend
-```
+A `Dockerfile` based on `python:3.12-slim` is provided in `backend/` for deployment reference, but Docker build was not run or verified locally in this environment.
 
 ---
 
