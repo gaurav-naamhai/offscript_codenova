@@ -1,10 +1,10 @@
 """FastAPI Application for Inkloom AI compliance governance."""
 
 from collections import Counter
-import logging
-import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+import logging
+from typing import List, Optional, Set
+import uuid
 
 from fastapi import (
     FastAPI,
@@ -21,6 +21,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings
@@ -51,172 +52,124 @@ from app.repository import SubmissionRepository, get_repository
 
 logger = logging.getLogger("inkloom_app")
 
-ALLOWED_IMAGE_PREFIXES = (
-    b"\x89PNG\r\n\x1a\n",  # PNG
-    b"\xff\xd8\xff",  # JPEG
-)
+ALLOWED_IMAGE_PREFIXES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
 MAX_TEXT_LENGTH = 50000
 MAX_IMAGE_SIZE = 5 * 1024 * 1024
 MAX_PDF_SIZE = 10 * 1024 * 1024
 
 SERVICE_DEFINITIONS = {
-    "gemini": {
-        "name": "Gemini",
-        "description": "Google Gemini multimodal engine for guideline analysis and claim parsing",
-    },
-    "exa": {
-        "name": "Exa",
-        "description": "Exa neural search for external claim reference discovery",
-    },
-    "tinyfish": {
-        "name": "TinyFish",
-        "description": "TinySearch and TinyFetch for live web verification and factual grounding",
-    },
-    "supabase": {
-        "name": "Supabase",
-        "description": "Supabase PostgreSQL vector and relational store",
-    },
+    "gemini": {"name": "Gemini", "description": "Google Gemini multimodal engine for guideline analysis and claim parsing"},
+    "exa": {"name": "Exa", "description": "Exa neural search for external claim reference discovery"},
+    "tinyfish": {"name": "TinyFish", "description": "TinySearch and TinyFetch for live web verification and factual grounding"},
+    "supabase": {"name": "Supabase", "description": "Supabase PostgreSQL vector and relational store"},
 }
 
 
 def is_valid_image(data: bytes) -> bool:
     """Validate image bytes for PNG, JPEG, or WEBP magic headers."""
-    if data.startswith(ALLOWED_IMAGE_PREFIXES):
-        return True
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return True
-    return False
-
-
-def parse_hex_color(hex_str: str) -> tuple[float, float, float]:
-    """Parse hex color into normalized RGB components, raising ValueError on failure."""
-    raw = hex_str.strip()
-    if raw.startswith("#"):
-        raw = raw[1:]
-    if len(raw) == 3:
-        raw = "".join(c * 2 for c in raw)
-    if len(raw) != 6:
-        raise ValueError(f"Invalid hex color length for '{hex_str}'")
-    try:
-        r = int(raw[0:2], 16) / 255.0
-        g = int(raw[2:4], 16) / 255.0
-        b = int(raw[4:6], 16) / 255.0
-    except ValueError as exc:
-        raise ValueError(f"Invalid hex character in '{hex_str}'") from exc
-    return r, g, b
-
-
-def channel_luminance(c: float) -> float:
-    """Convert sRGB channel value to linear luminance component."""
-    if c <= 0.04045:
-        return c / 12.92
-    return ((c + 0.055) / 1.055) ** 2.4
-
-
-def relative_luminance(r: float, g: float, b: float) -> float:
-    """Calculate WCAG relative luminance."""
-    r_lum = channel_luminance(r)
-    g_lum = channel_luminance(g)
-    b_lum = channel_luminance(b)
-    return 0.2126 * r_lum + 0.7152 * g_lum + 0.0722 * b_lum
+    return data.startswith(ALLOWED_IMAGE_PREFIXES) or (
+        len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    )
 
 
 def compute_contrast_ratio(fg: str, bg: str) -> float:
     """Calculate WCAG contrast ratio between foreground and background colors."""
-    r1, g1, b1 = parse_hex_color(fg)
-    r2, g2, b2 = parse_hex_color(bg)
-    lum1 = relative_luminance(r1, g1, b1)
-    lum2 = relative_luminance(r2, g2, b2)
-    lighter = max(lum1, lum2)
-    darker = min(lum1, lum2)
-    return round((lighter + 0.05) / (darker + 0.05), 2)
+    def lum(h: str) -> float:
+        raw = h.strip().lstrip("#")
+        if len(raw) == 3:
+            raw = "".join(c * 2 for c in raw)
+        if len(raw) != 6:
+            raise ValueError(f"Invalid hex color length for '{h}'")
+        try:
+            rgb = [int(raw[i : i + 2], 16) / 255.0 for i in (0, 2, 4)]
+        except ValueError as exc:
+            raise ValueError(f"Invalid hex character in '{h}'") from exc
+        c = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    l1, l2 = lum(fg), lum(bg)
+    return round((max(l1, l2) + 0.05) / (min(l1, l2) + 0.05), 2)
 
 
 async def validate_submission_payload(
-    content_type: str,
-    text: Optional[str],
-    file: Optional[UploadFile],
+    content_type: str, text: Optional[str], file: Optional[UploadFile]
 ) -> tuple[Optional[str], Optional[bytes], Optional[str], Optional[str]]:
     """Validate multipart content and return cleaned text, bytes, filename, and mime."""
     if content_type not in {"text", "image", "pdf"}:
-        raise HTTPException(
-            status_code=422,
-            detail="Invalid content_type. Must be text, image, or pdf",
-        )
+        raise HTTPException(422, "Invalid content_type. Must be text, image, or pdf")
 
-    file_bytes: Optional[bytes] = None
-    file_name: Optional[str] = None
-    file_mime: Optional[str] = None
     cleaned_text = text.strip() if text else None
-
     if content_type == "text":
         if file is not None and file.filename:
-            raise HTTPException(
-                status_code=422,
-                detail="File upload not allowed when content_type is text",
-            )
+            raise HTTPException(422, "File upload not allowed when content_type is text")
         if not cleaned_text:
-            raise HTTPException(
-                status_code=422,
-                detail="Text content cannot be empty",
-            )
+            raise HTTPException(422, "Text content cannot be empty")
         if len(cleaned_text) > MAX_TEXT_LENGTH:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Text content exceeds {MAX_TEXT_LENGTH} characters limit",
-            )
+            raise HTTPException(422, f"Text content exceeds {MAX_TEXT_LENGTH} characters limit")
+        return cleaned_text, None, None, None
 
-    elif content_type == "image":
-        if cleaned_text:
-            raise HTTPException(
-                status_code=422,
-                detail="Text content not allowed when content_type is image",
-            )
-        if file is None or not file.filename:
-            raise HTTPException(
-                status_code=422,
-                detail="File is required for image submission",
-            )
-        file_bytes = await file.read()
-        if len(file_bytes) > MAX_IMAGE_SIZE:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Image exceeds {MAX_IMAGE_SIZE} bytes limit (5MB)",
-            )
-        if not is_valid_image(file_bytes):
-            raise HTTPException(
-                status_code=422,
-                detail="Invalid image format. Allowed formats are PNG, JPEG, WEBP",
-            )
-        file_name = file.filename
-        file_mime = file.content_type
+    if cleaned_text:
+        raise HTTPException(422, f"Text content not allowed when content_type is {content_type}")
+    if file is None or not file.filename:
+        raise HTTPException(422, f"File is required for {content_type} submission")
 
-    elif content_type == "pdf":
-        if cleaned_text:
-            raise HTTPException(
-                status_code=422,
-                detail="Text content not allowed when content_type is pdf",
-            )
-        if file is None or not file.filename:
-            raise HTTPException(
-                status_code=422,
-                detail="File is required for pdf submission",
-            )
-        file_bytes = await file.read()
-        if len(file_bytes) > MAX_PDF_SIZE:
-            raise HTTPException(
-                status_code=422,
-                detail=f"PDF exceeds {MAX_PDF_SIZE} bytes limit (10MB)",
-            )
-        if not file_bytes.startswith(b"%PDF-"):
-            raise HTTPException(
-                status_code=422,
-                detail="Invalid PDF format. File must start with %PDF-",
-            )
-        file_name = file.filename
-        file_mime = file.content_type
+    file_bytes = await file.read()
+    limit = MAX_IMAGE_SIZE if content_type == "image" else MAX_PDF_SIZE
+    limit_desc = "5MB" if content_type == "image" else "10MB"
+    if len(file_bytes) > limit:
+        prefix = "Image" if content_type == "image" else "PDF"
+        raise HTTPException(422, f"{prefix} exceeds {limit} bytes limit ({limit_desc})")
+    if content_type == "image" and not is_valid_image(file_bytes):
+        raise HTTPException(422, "Invalid image format. Allowed formats are PNG, JPEG, WEBP")
+    if content_type == "pdf" and not file_bytes.startswith(b"%PDF-"):
+        raise HTTPException(422, "Invalid PDF format. File must start with %PDF-")
 
-    return cleaned_text, file_bytes, file_name, file_mime
+    return None, file_bytes, file.filename, file.content_type
+
+
+async def get_sub_or_404(repo: SubmissionRepository, sub_id: str) -> Submission:
+    sub = await repo.get_submission(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return sub
+
+
+async def _find_flag(repo: SubmissionRepository, sub_id: str, flag_id: str, version: int) -> Flag:
+    flags = await repo.get_flags(sub_id, version=version)
+    target = next((f for f in flags if f.id == flag_id), None)
+    if not target:
+        target = next((f for f in await repo.get_all_flags(sub_id) if f.id == flag_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Flag not found")
+    return target
+
+
+async def record_audit(
+    repo: SubmissionRepository,
+    sub_id: str,
+    role: str,
+    action: str,
+    detail: Optional[str] = None,
+    x_actor: Optional[str] = None,
+    timestamp: Optional[str] = None,
+) -> AuditEvent:
+    actor = x_actor.strip() if x_actor and x_actor.strip() else role
+    event = AuditEvent(
+        actor_role=role,
+        action=action,
+        detail=detail or "",
+        timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+        actor=actor,
+    )
+    return await repo.add_audit_event(sub_id, event)
+
+
+def require_role(role: str, allowed: Set[str], context: str = ""):
+    if role not in allowed:
+        msg = f"Only creators can {context}" if allowed == {"creator"} else (
+            f"Role '{role}' is not authorized for {context}" if context else f"Role '{role}' is not authorized"
+        )
+        raise HTTPException(status_code=403, detail=msg)
 
 
 def create_app(
@@ -233,11 +186,9 @@ def create_app(
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
-
     app.state.settings = app_settings
     app.state.repo = app_repo
 
-    # CORS configuration
     if app_settings.cors_origins:
         allow_all = app_settings.cors_origins == ["*"]
         app.add_middleware(
@@ -248,68 +199,34 @@ def create_app(
             allow_headers=["*"],
         )
 
-    # Global Exception Handlers
     @app.exception_handler(StarletteHTTPException)
-    async def http_exception_handler(
-        request: Request, exc: StarletteHTTPException
-    ):
-        code_map = {
-            400: "bad_request",
-            403: "forbidden",
-            404: "not_found",
-            409: "conflict",
-            422: "unprocessable_entity",
-            500: "internal_error",
-        }
-        code = code_map.get(exc.status_code, "http_error")
-        message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": {"code": code, "message": message}},
-        )
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        codes = {400: "bad_request", 403: "forbidden", 404: "not_found", 409: "conflict", 422: "unprocessable_entity", 500: "internal_error"}
+        msg = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return JSONResponse(status_code=exc.status_code, content={"error": {"code": codes.get(exc.status_code, "http_error"), "message": msg}})
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(
-        request: Request, exc: RequestValidationError
-    ):
-        errors = exc.errors()
-        messages = []
-        for err in errors:
-            loc = ".".join(str(l) for l in err.get("loc", []))
-            msg = err.get("msg", "Invalid input")
-            messages.append(f"{loc}: {msg}" if loc else msg)
-        message = "; ".join(messages) if messages else "Validation failed"
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"code": "validation_error", "message": message}},
-        )
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        msgs = [f"{'.'.join(str(l) for l in err.get('loc', []))}: {err.get('msg', 'Invalid input')}" for err in exc.errors()]
+        return JSONResponse(status_code=422, content={"error": {"code": "validation_error", "message": "; ".join(msgs) if msgs else "Validation failed"}})
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         logger.error("Unhandled exception: %s", exc, exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": {
-                    "code": "internal_error",
-                    "message": "An internal server error occurred",
-                }
-            },
-        )
+        return JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "An internal server error occurred"}})
 
-    # Routes
     @app.get("/health")
     async def health():
+        """Health check probe."""
         return {"status": "ok"}
 
     @app.get("/submissions", response_model=List[SubmissionListItem])
     async def list_submissions(status: Optional[str] = Query(None)):
+        """List all submissions with flag summaries."""
         submissions = await app_repo.list_submissions(status=status)
         results = []
         for sub in submissions:
             flags = await app_repo.get_flags(sub.id, version=sub.version)
-            flag_count = len(flags)
-            needs_human_count = sum(1 for f in flags if f.needs_human)
             results.append(
                 SubmissionListItem(
                     id=sub.id,
@@ -317,8 +234,8 @@ def create_app(
                     status=sub.status,
                     version=sub.version,
                     created_at=sub.created_at,
-                    flag_count=flag_count,
-                    needs_human_count=needs_human_count,
+                    flag_count=len(flags),
+                    needs_human_count=sum(1 for f in flags if f.needs_human),
                 )
             )
         return results
@@ -331,16 +248,11 @@ def create_app(
         file: Optional[UploadFile] = File(None),
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        if role != "creator":
-            raise HTTPException(
-                status_code=403,
-                detail="Only creators can create submissions",
-            )
-
+        """Create a new compliance submission."""
+        require_role(role, {"creator"}, "create submissions")
         cleaned_text, file_bytes, file_name, file_mime = (
             await validate_submission_payload(content_type, text, file)
         )
-
         now_iso = datetime.now(timezone.utc).isoformat()
         sub_id = str(uuid.uuid4())
         submission = Submission(
@@ -358,19 +270,15 @@ def create_app(
             updated_at=now_iso,
         )
         await app_repo.create_submission(submission)
-
-        actor = x_actor.strip() if x_actor and x_actor.strip() else role
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             sub_id,
-            AuditEvent(
-                actor_role=role,
-                action="created",
-                detail=f"Submission created with content_type={content_type}",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            role,
+            "created",
+            f"Submission created with content_type={content_type}",
+            x_actor=x_actor,
+            timestamp=now_iso,
         )
-
         return submission
 
     @app.post("/submissions/{id}/revise")
@@ -382,16 +290,9 @@ def create_app(
         file: Optional[UploadFile] = File(None),
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
-        if role != "creator":
-            raise HTTPException(
-                status_code=403,
-                detail="Only creators can revise submissions",
-            )
-
+        """Revise draft content before review."""
+        sub = await get_sub_or_404(app_repo, id)
+        require_role(role, {"creator"}, "revise submissions")
         if sub.status != "draft":
             raise HTTPException(
                 status_code=409,
@@ -401,7 +302,6 @@ def create_app(
         cleaned_text, file_bytes, file_name, file_mime = (
             await validate_submission_payload(content_type, text, file)
         )
-
         now_iso = datetime.now(timezone.utc).isoformat()
         sub.content_type = content_type
         sub.text = cleaned_text
@@ -410,180 +310,115 @@ def create_app(
         sub.file_size = len(file_bytes) if file_bytes else None
         sub.file_bytes = file_bytes
         sub.updated_at = now_iso
+
         await app_repo.update_submission(sub)
-
-        actor = x_actor.strip() if x_actor and x_actor.strip() else role
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=role,
-                action="revised",
-                detail=f"Submission revised with content_type={content_type}",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            role,
+            "revised",
+            f"Submission revised with content_type={content_type}",
+            x_actor=x_actor,
+            timestamp=now_iso,
         )
-
         return sub
 
     @app.get("/submissions/{id}/file")
     async def get_submission_file(id: str):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Retrieve binary file bytes for image or PDF submission."""
+        sub = await get_sub_or_404(app_repo, id)
         if sub.content_type == "text" or not sub.file_bytes:
             raise HTTPException(
-                status_code=404,
-                detail="File not found for text submission",
+                status_code=404, detail="File not found for text submission"
             )
+        return Response(
+            content=sub.file_bytes,
+            media_type=sub.file_mime or "application/octet-stream",
+        )
 
-        media_type = sub.file_mime or "application/octet-stream"
-        return Response(content=sub.file_bytes, media_type=media_type)
-
-    @app.post(
-        "/submissions/{id}/flags/{flag_id}/resolution", response_model=Flag
-    )
+    @app.post("/submissions/{id}/flags/{flag_id}/resolution", response_model=Flag)
     async def resolve_flag(
         id: str,
         flag_id: str,
         payload: ResolutionRequest,
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Resolve a specific flag (accept or dismiss)."""
+        sub = await get_sub_or_404(app_repo, id)
         role = payload.role or "creator"
-        if role != "creator":
-            raise HTTPException(
-                status_code=403,
-                detail="Only creators can resolve flags",
-            )
-
+        require_role(role, {"creator"}, "resolve flags")
         if payload.action not in {"accept", "dismiss"}:
             raise HTTPException(
-                status_code=422,
-                detail="Action must be 'accept' or 'dismiss'",
+                status_code=422, detail="Action must be 'accept' or 'dismiss'"
             )
 
-        # Retrieve flags for current version or all versions
         flags = await app_repo.get_flags(id, version=sub.version)
-        target_flag = next((f for f in flags if f.id == flag_id), None)
-        if not target_flag:
-            all_flags = await app_repo.get_all_flags(id)
-            target_flag = next((f for f in all_flags if f.id == flag_id), None)
-
-        if not target_flag:
-            raise HTTPException(status_code=404, detail="Flag not found")
+        target_flag = await _find_flag(app_repo, id, flag_id, sub.version)
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        actor = x_actor.strip() if x_actor and x_actor.strip() else role
-
         if payload.action == "accept":
-            # Safety check: if passage is not in current text, reject with 409
             if sub.content_type == "text":
                 current_text = sub.text or ""
                 if target_flag.passage not in current_text:
                     raise HTTPException(
                         status_code=409,
-                        detail=(
-                            f"Flag passage '{target_flag.passage}' was not found in the current text"
-                        ),
+                        detail=f"Flag passage '{target_flag.passage}' was not found in the current text",
                     )
                 if target_flag.suggested_correction:
                     sub.text = current_text.replace(
-                        target_flag.passage,
-                        target_flag.suggested_correction,
-                        1,
+                        target_flag.passage, target_flag.suggested_correction, 1
                     )
                     sub.updated_at = now_iso
                     await app_repo.update_submission(sub)
-
             target_flag.status = "accepted"
-            if payload.comment:
-                target_flag.comments.append(payload.comment)
-            await app_repo.update_flag(id, target_flag)
-
-            await app_repo.add_audit_event(
-                id,
-                AuditEvent(
-                    actor_role=role,
-                    action="flag_resolved",
-                    detail=f"Flag {flag_id} resolved with action 'accept'",
-                    timestamp=now_iso,
-                    actor=actor,
-                ),
-            )
         else:
             target_flag.status = "dismissed"
-            if payload.comment:
-                target_flag.comments.append(payload.comment)
-            await app_repo.update_flag(id, target_flag)
 
-            await app_repo.add_audit_event(
-                id,
-                AuditEvent(
-                    actor_role=role,
-                    action="flag_resolved",
-                    detail=f"Flag {flag_id} resolved with action 'dismiss'",
-                    timestamp=now_iso,
-                    actor=actor,
-                ),
-            )
+        if payload.comment:
+            target_flag.comments.append(payload.comment)
+        await app_repo.update_flag(id, target_flag)
 
+        await record_audit(
+            app_repo,
+            id,
+            role,
+            "flag_resolved",
+            f"Flag {flag_id} resolved with action '{payload.action}'",
+            x_actor=x_actor,
+            timestamp=now_iso,
+        )
         return target_flag
 
-    @app.post(
-        "/submissions/{id}/flags/{flag_id}/recheck",
-        response_model=RecheckResponse,
-    )
+    @app.post("/submissions/{id}/flags/{flag_id}/recheck", response_model=RecheckResponse)
     async def recheck_flag(
         id: str,
         flag_id: str,
         payload: Optional[RecheckRequest] = None,
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        role = (payload.role if payload and payload.role else "creator")
-        if role != "creator":
-            raise HTTPException(
-                status_code=403,
-                detail="Only creators can recheck flags",
-            )
-
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Simulate applying flag correction and recheck in threadpool."""
+        role = payload.role if payload and payload.role else "creator"
+        require_role(role, {"creator"}, "recheck flags")
+        sub = await get_sub_or_404(app_repo, id)
         if sub.content_type != "text":
             raise HTTPException(
                 status_code=400,
                 detail="Recheck is only supported for text submissions",
             )
 
-        flags = await app_repo.get_flags(id, version=sub.version)
-        target_flag = next((f for f in flags if f.id == flag_id), None)
-        if not target_flag:
-            all_flags = await app_repo.get_all_flags(id)
-            target_flag = next((f for f in all_flags if f.id == flag_id), None)
+        target_flag = await _find_flag(app_repo, id, flag_id, sub.version)
 
-        if not target_flag:
-            raise HTTPException(status_code=404, detail="Flag not found")
-
-        # Apply candidate correction without saving
         candidate_text = sub.text or ""
-        if target_flag.suggested_correction:
-            if target_flag.passage in candidate_text:
-                candidate_text = candidate_text.replace(
-                    target_flag.passage, target_flag.suggested_correction, 1
-                )
+        if target_flag.suggested_correction and target_flag.passage in candidate_text:
+            candidate_text = candidate_text.replace(
+                target_flag.passage, target_flag.suggested_correction, 1
+            )
 
         candidate_payload = ContentPayload(
-            content_type="text",
-            text=candidate_text,
+            content_type="text", text=candidate_text
         )
-        new_flags, _ = run_pipeline(
-            candidate_payload, submission_id=sub.id, version=sub.version
+        new_flags, _ = await run_in_threadpool(
+            run_pipeline, candidate_payload, sub.id, sub.version
         )
 
         original_flag_gone = not any(
@@ -591,19 +426,14 @@ def create_app(
         )
         has_needs_human = any(f.needs_human for f in new_flags)
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        actor = x_actor.strip() if x_actor and x_actor.strip() else role
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=role,
-                action="recheck",
-                detail=f"Recheck executed for flag {flag_id}",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            role,
+            "recheck",
+            f"Recheck executed for flag {flag_id}",
+            x_actor=x_actor,
         )
-
         return RecheckResponse(
             new_flags=new_flags,
             original_flag_gone=original_flag_gone,
@@ -612,21 +442,12 @@ def create_app(
 
     @app.get("/submissions/{id}/versions", response_model=List[VersionInfo])
     async def get_submission_versions(id: str):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
-        versions = await app_repo.get_versions(id)
+        """List historical versions and flag counts."""
+        await get_sub_or_404(app_repo, id)
         results = []
-        for v in versions:
+        for v in await app_repo.get_versions(id):
             v_flags = await app_repo.get_flags(id, version=v)
-            results.append(
-                VersionInfo(
-                    version=v,
-                    flag_count=len(v_flags),
-                    needs_human_count=sum(1 for f in v_flags if f.needs_human),
-                )
-            )
+            results.append(VersionInfo(version=v, flag_count=len(v_flags), needs_human_count=sum(1 for f in v_flags if f.needs_human)))
         return results
 
     @app.post("/submissions/{id}/check", response_model=CheckResponse)
@@ -635,15 +456,9 @@ def create_app(
         payload: CheckRequest,
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
-        if payload.role != "creator":
-            raise HTTPException(
-                status_code=403, detail="Only creators can run checks"
-            )
-
+        """Run compliance review pipeline asynchronously in threadpool."""
+        sub = await get_sub_or_404(app_repo, id)
+        require_role(payload.role, {"creator"}, "run checks")
         if sub.status != "draft":
             raise HTTPException(
                 status_code=409,
@@ -654,19 +469,14 @@ def create_app(
         sub.status = "ai_review"
         sub.updated_at = now_iso
         await app_repo.update_submission(sub)
-
-        actor = (
-            x_actor.strip() if x_actor and x_actor.strip() else payload.role
-        )
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=payload.role,
-                action="check_started",
-                detail="Compliance check pipeline started",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            payload.role,
+            "check_started",
+            "Compliance check pipeline started",
+            x_actor=x_actor,
+            timestamp=now_iso,
         )
 
         content = ContentPayload(
@@ -676,67 +486,48 @@ def create_app(
             file_mime=sub.file_mime,
             file_bytes=sub.file_bytes,
         )
-
-        flags, degraded_modules = run_pipeline(
-            content, sub.id, version=sub.version
+        flags, degraded_modules = await run_in_threadpool(
+            run_pipeline, content, sub.id, sub.version
         )
 
         for dm in degraded_modules:
-            await app_repo.add_audit_event(
+            await record_audit(
+                app_repo,
                 id,
-                AuditEvent(
-                    actor_role=payload.role,
-                    action="module_fallback",
-                    detail=f"{dm.module}: {dm.error}",
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    actor=actor,
-                ),
+                payload.role,
+                "module_fallback",
+                f"{dm.module}: {dm.error}",
+                x_actor=x_actor,
             )
 
-        # Store flags indexed by submission version
         await app_repo.set_flags(id, flags, version=sub.version)
-
-        # Transition to manager_review
         completed_iso = datetime.now(timezone.utc).isoformat()
         sub.status = "manager_review"
         sub.updated_at = completed_iso
         await app_repo.update_submission(sub)
 
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=payload.role,
-                action="check_completed",
-                detail=f"Check completed with {len(flags)} flags",
-                timestamp=completed_iso,
-                actor=actor,
-            ),
+            payload.role,
+            "check_completed",
+            f"Check completed with {len(flags)} flags",
+            x_actor=x_actor,
+            timestamp=completed_iso,
         )
-
         return CheckResponse(
             submission=sub, flags=flags, degraded_modules=degraded_modules
         )
 
-    @app.get(
-        "/submissions/{id}",
-        response_model=SubmissionDetailResponse,
-    )
-    async def get_submission_detail(
-        id: str, version: Optional[int] = Query(None)
-    ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
-        flags = await app_repo.get_flags(id, version=version)
-        comments = await app_repo.get_comments(id)
-        decisions = await app_repo.get_decisions(id)
-
+    @app.get("/submissions/{id}", response_model=SubmissionDetailResponse)
+    async def get_submission_detail(id: str, version: Optional[int] = Query(None)):
+        """Get full details of a submission."""
+        sub = await get_sub_or_404(app_repo, id)
         return SubmissionDetailResponse(
             submission=sub,
-            flags=flags,
-            comments=comments,
-            decisions=decisions,
+            flags=await app_repo.get_flags(id, version=version),
+            comments=await app_repo.get_comments(id),
+            decisions=await app_repo.get_decisions(id),
         )
 
     @app.post("/submissions/{id}/decision", response_model=Decision)
@@ -745,45 +536,21 @@ def create_app(
         payload: DecisionRequest,
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Record manager or reviewer approval decision."""
+        sub = await get_sub_or_404(app_repo, id)
         if payload.decision not in {"approve", "request_changes"}:
-            raise HTTPException(
-                status_code=422,
-                detail="Decision must be 'approve' or 'request_changes'",
-            )
-
+            raise HTTPException(422, "Decision must be 'approve' or 'request_changes'")
         if sub.status not in {"manager_review", "final_approval"}:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Cannot record decision in state '{sub.status}'",
-            )
+            raise HTTPException(409, f"Cannot record decision in state '{sub.status}'")
 
         if sub.status == "manager_review":
-            if payload.role != "manager":
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Role '{payload.role}' is not authorized for manager_review",
-                )
-            if payload.decision == "approve":
-                sub.status = "final_approval"
-            else:
-                sub.status = "draft"
-                sub.version += 1
-
-        elif sub.status == "final_approval":
-            if payload.role != "authorised_reviewer":
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Role '{payload.role}' is not authorized for final_approval",
-                )
-            if payload.decision == "approve":
-                sub.status = "approved"
-            else:
-                sub.status = "draft"
-                sub.version += 1
+            require_role(payload.role, {"manager"}, "manager_review")
+            sub.status = "final_approval" if payload.decision == "approve" else "draft"
+        else:
+            require_role(payload.role, {"authorised_reviewer"}, "final_approval")
+            sub.status = "approved" if payload.decision == "approve" else "draft"
+        if payload.decision == "request_changes":
+            sub.version += 1
 
         now_iso = datetime.now(timezone.utc).isoformat()
         sub.updated_at = now_iso
@@ -799,49 +566,30 @@ def create_app(
             created_at=now_iso,
         )
         await app_repo.add_decision(decision_obj)
-
-        actor = (
-            x_actor.strip() if x_actor and x_actor.strip() else payload.role
-        )
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=payload.role,
-                action="decision_recorded",
-                detail=f"Decision '{payload.decision}' recorded. Status changed to '{sub.status}', version {sub.version}",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            payload.role,
+            "decision_recorded",
+            f"Decision '{payload.decision}' recorded. Status changed to '{sub.status}', version {sub.version}",
+            x_actor=x_actor,
+            timestamp=now_iso,
         )
-
         return decision_obj
 
-    @app.post(
-        "/submissions/{id}/comments",
-        response_model=Comment,
-        status_code=status.HTTP_201_CREATED,
-    )
+    @app.post("/submissions/{id}/comments", response_model=Comment, status_code=status.HTTP_201_CREATED)
     async def add_comment(
         id: str,
         payload: CommentRequest,
         x_actor: Optional[str] = Header(None, alias="X-Actor"),
     ):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Add a review comment tied to current submission version."""
+        sub = await get_sub_or_404(app_repo, id)
         if payload.role not in {"creator", "manager", "authorised_reviewer"}:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Role '{payload.role}' is not authorized to comment",
-            )
-
+            raise HTTPException(403, f"Role '{payload.role}' is not authorized to comment")
         cleaned_text = payload.text.strip() if payload.text else None
         if not cleaned_text:
-            raise HTTPException(
-                status_code=422,
-                detail="Comment text cannot be empty",
-            )
+            raise HTTPException(422, "Comment text cannot be empty")
 
         now_iso = datetime.now(timezone.utc).isoformat()
         comment_obj = Comment(
@@ -853,33 +601,26 @@ def create_app(
             created_at=now_iso,
         )
         await app_repo.add_comment(comment_obj)
-
-        actor = (
-            x_actor.strip() if x_actor and x_actor.strip() else payload.role
-        )
-        await app_repo.add_audit_event(
+        await record_audit(
+            app_repo,
             id,
-            AuditEvent(
-                actor_role=payload.role,
-                action="comment_added",
-                detail=f"Comment added by {payload.role} on version {sub.version}",
-                timestamp=now_iso,
-                actor=actor,
-            ),
+            payload.role,
+            "comment_added",
+            f"Comment added by {payload.role} on version {sub.version}",
+            x_actor=x_actor,
+            timestamp=now_iso,
         )
-
         return comment_obj
 
     @app.get("/submissions/{id}/audit", response_model=List[AuditEvent])
     async def get_audit_trail(id: str):
-        sub = await app_repo.get_submission(id)
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-
+        """Get chronological audit events for submission."""
+        await get_sub_or_404(app_repo, id)
         return await app_repo.get_audit_events(id)
 
     @app.get("/insights/recurring", response_model=RecurringInsightsResponse)
     async def recurring_insights():
+        """Aggregate recurring compliance insights across submissions in a single pass."""
         all_flags = await app_repo.get_all_flags()
         guideline_counts: Counter[str] = Counter()
         state_counts: Counter[str] = Counter()
@@ -887,14 +628,14 @@ def create_app(
         for flag in all_flags:
             state_counts[flag.state] += 1
             if flag.guideline_ref:
-                ref_id = f"{flag.guideline_ref.document} - {flag.guideline_ref.passage_ref}"
-                guideline_counts[ref_id] += 1
+                guideline_counts[
+                    f"{flag.guideline_ref.document} - {flag.guideline_ref.passage_ref}"
+                ] += 1
 
         top_guidelines = [
             {"guideline": g, "count": c}
             for g, c in guideline_counts.most_common(10)
         ]
-
         return RecurringInsightsResponse(
             top_guidelines=top_guidelines,
             state_counts=dict(state_counts),
@@ -903,39 +644,33 @@ def create_app(
 
     @app.get("/disclosures", response_model=DisclosuresResponse)
     async def get_disclosures():
+        """Retrieve external services disclosure metadata."""
         enabled_list = app_settings.enabled_services
-        items = []
-        for service_id, meta in SERVICE_DEFINITIONS.items():
-            is_enabled = service_id in enabled_list
-            items.append(
-                DisclosureItem(
-                    name=meta["name"],
-                    service_id=service_id,
-                    description=meta["description"],
-                    enabled=is_enabled,
-                )
+        items = [
+            DisclosureItem(
+                name=meta["name"],
+                service_id=service_id,
+                description=meta["description"],
+                enabled=service_id in enabled_list,
             )
-
+            for service_id, meta in SERVICE_DEFINITIONS.items()
+        ]
         return DisclosuresResponse(
             external_services=items,
             services_enabled=enabled_list,
             human_in_the_loop_notice=(
                 "Publication is always a human decision. AI recommendations "
-                "are advisory and require explicit manager and authorised "
-                "reviewer approval."
+                "are advisory and require explicit manager and authorised reviewer approval."
             ),
         )
 
     @app.get("/tools/contrast", response_model=ContrastResponse)
     async def check_contrast(fg: str = Query(...), bg: str = Query(...)):
+        """Calculate WCAG contrast ratio for color pairs."""
         try:
             ratio = compute_contrast_ratio(fg, bg)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid hex color input: {exc}",
-            )
-
+            raise HTTPException(422, f"Invalid hex color input: {exc}")
         formatted_fg = fg if fg.startswith("#") else f"#{fg}"
         formatted_bg = bg if bg.startswith("#") else f"#{bg}"
         return ContrastResponse(
@@ -949,154 +684,48 @@ def create_app(
 
     @app.post("/demo/seed")
     async def demo_seed():
+        """Seed 3 sample submissions for live judging demonstrations."""
         if not app_settings.demo_mode:
-            raise HTTPException(
-                status_code=403,
-                detail="Demo mode is disabled. Set DEMO_MODE=true to enable seeding.",
-            )
+            raise HTTPException(403, "Demo mode is disabled. Set DEMO_MODE=true to enable seeding.")
 
-        seeded = []
         now_iso = datetime.now(timezone.utc).isoformat()
-
-        # Seed 1: draft text submission
-        sub1_id = str(uuid.uuid4())
-        sub1 = Submission(
-            id=sub1_id,
-            content_type="text",
-            role="creator",
-            status="draft",
-            version=1,
-            text="Inkloom AI helps distributed marketing teams prevent brand violations.",
-            created_at=now_iso,
-            updated_at=now_iso,
-        )
-        await app_repo.create_submission(sub1)
-        await app_repo.add_audit_event(
-            sub1_id,
-            AuditEvent(
-                actor_role="creator",
-                action="created",
-                detail="Demo submission 1 created (draft)",
+        seeds = [
+            ("draft", "Inkloom AI helps distributed marketing teams prevent brand violations.", False, False),
+            ("manager_review", "Industry-leading 99.9% uptime SLA with real-time audit logging.", True, False),
+            ("approved", "Trusted compliance automation for enterprise publishing.", True, True),
+        ]
+        seeded: List[Submission] = []
+        for idx, (st, txt, run_pipe, do_dec) in enumerate(seeds, 1):
+            sub = Submission(
+                id=str(uuid.uuid4()),
+                content_type="text",
+                role="creator",
+                status=st,
+                version=1,
+                text=txt,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            await app_repo.create_submission(sub)
+            await record_audit(
+                app_repo, sub.id, "creator", "created",
+                f"Demo submission {idx} created" + (f" ({st})" if st == "draft" else ""),
                 timestamp=now_iso,
-                actor="creator",
-            ),
-        )
-        seeded.append(sub1)
+            )
+            if run_pipe:
+                fl, _ = run_pipeline(ContentPayload(content_type="text", text=txt), sub.id, 1)
+                await app_repo.set_flags(sub.id, fl, 1)
+                await record_audit(app_repo, sub.id, "creator", "check_completed", f"Check completed with {len(fl)} flags", timestamp=now_iso)
+            if do_dec:
+                d1 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="manager", decision="approve", comment="Brand voice aligned.", version=1, created_at=now_iso)
+                d2 = Decision(id=str(uuid.uuid4()), submission_id=sub.id, role="authorised_reviewer", decision="approve", comment="Final legal sign-off granted.", version=1, created_at=now_iso)
+                await app_repo.add_decision(d1)
+                await app_repo.add_decision(d2)
+                await record_audit(app_repo, sub.id, "manager", "decision_recorded", "Manager approved", timestamp=now_iso)
+                await record_audit(app_repo, sub.id, "authorised_reviewer", "decision_recorded", "Authorised reviewer approved", timestamp=now_iso)
+            seeded.append(sub)
 
-        # Seed 2: manager_review submission with flags
-        sub2_id = str(uuid.uuid4())
-        sub2 = Submission(
-            id=sub2_id,
-            content_type="text",
-            role="creator",
-            status="manager_review",
-            version=1,
-            text="Industry-leading 99.9% uptime SLA with real-time audit logging.",
-            created_at=now_iso,
-            updated_at=now_iso,
-        )
-        await app_repo.create_submission(sub2)
-        content2 = ContentPayload(content_type="text", text=sub2.text)
-        flags2, _ = run_pipeline(content2, sub2_id, version=1)
-        await app_repo.set_flags(sub2_id, flags2, version=1)
-        await app_repo.add_audit_event(
-            sub2_id,
-            AuditEvent(
-                actor_role="creator",
-                action="created",
-                detail="Demo submission 2 created",
-                timestamp=now_iso,
-                actor="creator",
-            ),
-        )
-        await app_repo.add_audit_event(
-            sub2_id,
-            AuditEvent(
-                actor_role="creator",
-                action="check_completed",
-                detail=f"Check completed with {len(flags2)} flags",
-                timestamp=now_iso,
-                actor="creator",
-            ),
-        )
-        seeded.append(sub2)
-
-        # Seed 3: fully approved submission
-        sub3_id = str(uuid.uuid4())
-        sub3 = Submission(
-            id=sub3_id,
-            content_type="text",
-            role="creator",
-            status="approved",
-            version=1,
-            text="Trusted compliance automation for enterprise publishing.",
-            created_at=now_iso,
-            updated_at=now_iso,
-        )
-        await app_repo.create_submission(sub3)
-        content3 = ContentPayload(content_type="text", text=sub3.text)
-        flags3, _ = run_pipeline(content3, sub3_id, version=1)
-        await app_repo.set_flags(sub3_id, flags3, version=1)
-
-        dec1 = Decision(
-            id=str(uuid.uuid4()),
-            submission_id=sub3_id,
-            role="manager",
-            decision="approve",
-            comment="Brand voice aligned.",
-            version=1,
-            created_at=now_iso,
-        )
-        await app_repo.add_decision(dec1)
-
-        dec2 = Decision(
-            id=str(uuid.uuid4()),
-            submission_id=sub3_id,
-            role="authorised_reviewer",
-            decision="approve",
-            comment="Final legal sign-off granted.",
-            version=1,
-            created_at=now_iso,
-        )
-        await app_repo.add_decision(dec2)
-
-        await app_repo.add_audit_event(
-            sub3_id,
-            AuditEvent(
-                actor_role="creator",
-                action="created",
-                detail="Demo submission 3 created",
-                timestamp=now_iso,
-                actor="creator",
-            ),
-        )
-        await app_repo.add_audit_event(
-            sub3_id,
-            AuditEvent(
-                actor_role="manager",
-                action="decision_recorded",
-                detail="Manager approved",
-                timestamp=now_iso,
-                actor="manager",
-            ),
-        )
-        await app_repo.add_audit_event(
-            sub3_id,
-            AuditEvent(
-                actor_role="authorised_reviewer",
-                action="decision_recorded",
-                detail="Authorised reviewer approved",
-                timestamp=now_iso,
-                actor="authorised_reviewer",
-            ),
-        )
-        seeded.append(sub3)
-
-        return {
-            "status": "ok",
-            "message": "Demo submissions seeded successfully",
-            "submissions": seeded,
-        }
+        return {"status": "ok", "message": "Demo submissions seeded successfully", "submissions": seeded}
 
     return app
 

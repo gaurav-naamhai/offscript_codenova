@@ -5,11 +5,8 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 RoleType = Literal["creator", "manager", "authorised_reviewer"]
-SubmissionStateType = Literal[
-    "draft", "ai_review", "manager_review", "final_approval", "approved"
-]
+SubmissionStateType = Literal["draft", "ai_review", "manager_review", "final_approval", "approved"]
 DecisionAction = Literal["approve", "request_changes"]
-ContentType = Literal["text", "image", "pdf"]
 FindingType = Literal["brand", "claim"]
 
 BRAND_STATES = {"aligned", "potential_issue", "unclear"}
@@ -18,8 +15,6 @@ CLAIM_STATES = {"supported", "contradicted", "insufficient_evidence"}
 
 @dataclass
 class ContentPayload:
-    """Payload representing content being checked across the pipeline."""
-
     content_type: str
     text: Optional[str] = None
     file_name: Optional[str] = None
@@ -51,21 +46,16 @@ class FlagDraft(BaseModel):
     external_sources: List[ExternalSource] = Field(default_factory=list)
     uncertainty_note: Optional[str] = None
     suggested_correction: Optional[str] = None
-    origin: Literal["module", "fixture"]
+    origin: Literal["module", "fixture", "error"] = "module"
     status: str = "open"
     comments: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_and_sync(self):
         if self.finding_type == "brand" and self.state not in BRAND_STATES:
-            raise ValueError(
-                f"State '{self.state}' is invalid for finding_type 'brand'. Must be one of {BRAND_STATES}"
-            )
+            raise ValueError(f"State '{self.state}' is invalid for finding_type 'brand'. Must be one of {BRAND_STATES}")
         if self.finding_type == "claim" and self.state not in CLAIM_STATES:
-            raise ValueError(
-                f"State '{self.state}' is invalid for finding_type 'claim'. Must be one of {CLAIM_STATES}"
-            )
-        # Synchronize guideline_ref and guideline_refs
+            raise ValueError(f"State '{self.state}' is invalid for finding_type 'claim'. Must be one of {CLAIM_STATES}")
         if self.guideline_refs and not self.guideline_ref:
             self.guideline_ref = self.guideline_refs[0]
         elif self.guideline_ref and not self.guideline_refs:
@@ -77,7 +67,7 @@ class Flag(FlagDraft):
     id: str
     submission_id: str
     version: int = 1
-    needs_human: bool
+    needs_human: bool = False
     created_at: str
 
 

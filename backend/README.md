@@ -74,10 +74,11 @@ Configure application settings via environment variables (read via `os.environ`)
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `FRONTEND_ORIGIN` | string | `""` | Comma-separated list of allowed CORS origins (e.g. `http://localhost:3000,http://127.0.0.1:3000`). Trims trailing slashes. Supports `*` for local development. |
-| `REPO_BACKEND` | string | `"memory"` | Storage engine: `memory` for thread-safe in-memory store, or `supabase` (raises `NotImplementedError`). |
+| `FRONTEND_ORIGIN` | string | `""` | Comma-separated list of allowed CORS origins (e.g. `http://localhost:3000,http://127.0.0.1:3000`). Trims trailing slashes. Supports `*` for demo and local development. |
+| `REPO_BACKEND` | string | `"memory"` | Storage engine: `memory` for thread-safe in-memory store (capped at 200 submissions), or `supabase` (raises `NotImplementedError`). |
 | `DEMO_MODE` | boolean | `false` | When set to `true`, enables `POST /demo/seed` to seed 3 mock submissions for judging. Must remain `false` by default. |
-| `EXTERNAL_SERVICES_ENABLED`| string | `"gemini,exa,tinyfish,supabase"` | Comma-separated list of external services disclosed in `GET /disclosures`. |
+| `EXTERNAL_SERVICES_ENABLED`| string | `""` | Comma-separated list of external services disclosed in `GET /disclosures`. Defaults to empty string. |
+| `GEMINI_MODEL` | string | `""` | Optional Google Gemini model override (e.g. `gemini-1.5-pro`). |
 | `GEMINI_API_KEY` | string | `""` | Google Gemini multimodal engine API key. |
 | `EXA_API_KEY` | string | `""` | Exa neural search API key. |
 | `TINYFISH_API_KEY` | string | `""` | TinySearch / TinyFetch web grounding API key. |
@@ -119,8 +120,8 @@ All plug-in modules reside in `app/plugins/`:
 2. `verification.py` (Owner: Ken)
 3. `brand_check.py` (Owner: Sera)
 
-### Resilient Fallback Architecture
-The pipeline in `app/pipeline.py` wraps each plugin call in a `try/except` block and checks the return type. If any plugin fails or returns an invalid object, the pipeline logs the full traceback server-side, records `{module, error: exception_type_only}` in `degraded_modules`, records a `module_fallback` audit event, and seamlessly falls back to fixture flags (`origin="fixture"`).
+### Failure Handling Architecture
+The pipeline in `app/pipeline.py` wraps each plugin call in a `try/except` block and validates the return type. If any plugin fails or returns an invalid object, the pipeline logs the full traceback server-side, records `{module, error: exception_type_only}` in `degraded_modules`, records a `module_fallback` audit event, and generates an explicit error flag (`origin="error"`, `needs_human=True`, `status="open"`, `passage="(whole submission)"`, no suggested correction). If retrieval fails, the pipeline continues with `guidelines=[]` so downstream verification and brand checking still run.
 
 ---
 
@@ -199,6 +200,7 @@ class ContentPayload:
 }
 ```
 
+- **Allowed Origins**: `"module"`, `"fixture"`, `"error"`.
 - **Allowed Brand States**: `"aligned"`, `"potential_issue"`, `"unclear"`.
 - **Allowed Claim States**: `"supported"`, `"contradicted"`, `"insufficient_evidence"`.
 - **Uncertainty Rule**: `needs_human` is automatically evaluated to `true` whenever state is `"unclear"`, `"contradicted"`, or `"insufficient_evidence"`.

@@ -1,5 +1,7 @@
-import os
+"""Application settings and environment variable configuration."""
+
 from dataclasses import dataclass, field
+import os
 from typing import List
 
 
@@ -13,6 +15,9 @@ class Settings:
     )
     gemini_api_key: str = field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
+    )
+    gemini_model: str = field(
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "")
     )
     exa_api_key: str = field(
         default_factory=lambda: os.getenv("EXA_API_KEY", "")
@@ -31,9 +36,7 @@ class Settings:
         in ("true", "1", "yes")
     )
     external_services_enabled: str = field(
-        default_factory=lambda: os.getenv(
-            "EXTERNAL_SERVICES_ENABLED", "gemini,exa,tinyfish,supabase"
-        )
+        default_factory=lambda: os.getenv("EXTERNAL_SERVICES_ENABLED", "")
     )
 
     @property
@@ -43,19 +46,9 @@ class Settings:
             return []
         if raw == "*":
             return ["*"]
-        origins = []
-        for item in raw.split(","):
-            cleaned = item.strip().rstrip("/")
-            if cleaned:
-                origins.append(cleaned)
-        return origins
+        return [p.strip().rstrip("/") for p in raw.split(",") if p.strip()]
 
     @property
     def enabled_services(self) -> List[str]:
-        if not self.external_services_enabled:
-            return []
-        return [
-            s.strip().lower()
-            for s in self.external_services_enabled.split(",")
-            if s.strip()
-        ]
+        raw = self.external_services_enabled.strip()
+        return [s.strip().lower() for s in raw.split(",") if s.strip()] if raw else []
