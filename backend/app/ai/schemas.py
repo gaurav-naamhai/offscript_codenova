@@ -153,6 +153,19 @@ class ClaimFinding(BaseModel):
     suggested_fix: Optional[str] = Field(
         default=None, description="Correction aligning claim with verified evidence"
     )
+    external_sources: List[ExternalSource] = Field(
+        default_factory=list, description="Structured external evidence sources supporting the finding"
+    )
+
+    def model_post_init(self, __context):
+        # Auto-sync external_sources list and single url/excerpt fields
+        if not self.external_sources and self.evidence_source_url and self.evidence_excerpt:
+            self.external_sources = [
+                ExternalSource(url=self.evidence_source_url, excerpt=self.evidence_excerpt)
+            ]
+        elif self.external_sources and not self.evidence_source_url:
+            self.evidence_source_url = self.external_sources[0].url
+            self.evidence_excerpt = self.external_sources[0].excerpt
 
 
 class ClaimVerificationOutput(BaseModel):
@@ -183,6 +196,11 @@ class SynthesizedFlag(BaseModel):
     origin: Literal["module", "fixture", "error"] = "module"
     status: str = "open"
     comments: List[str] = Field(default_factory=list)
+    needs_human: bool = False
+
+    def model_post_init(self, __context):
+        from app.uncertainty import needs_human
+        self.needs_human = needs_human(self.state)
 
     def to_flag_draft(self) -> FlagDraft:
         """Convert synthesized flag directly into Gaurav's domain FlagDraft."""
