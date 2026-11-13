@@ -20,7 +20,12 @@ EXA_API_KEY: str = os.getenv("EXA_API_KEY", "").strip()
 
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001").strip()
 EMBEDDING_DIM: int = 768
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
+_raw_gemini_model = os.getenv("GEMINI_MODEL", "").strip()
+GEMINI_MODEL: str = (
+    "gemini-2.5-flash"
+    if not _raw_gemini_model or _raw_gemini_model in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "3.5-flash-lite")
+    else _raw_gemini_model
+)
 
 TINYSEARCH_URL: str = "https://api.search.tinyfish.ai"
 TINYFETCH_URL: str = "https://api.fetch.tinyfish.ai"
@@ -48,5 +53,8 @@ def get_genai_client() -> genai.Client:
     if _genai_client is None:
         if not GEMINI_API_KEY:
             raise RuntimeError("Missing GEMINI_API_KEY in environment.")
-        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+        _genai_client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options={"api_version": "v1beta"},
+        )
     return _genai_client

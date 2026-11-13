@@ -36,7 +36,12 @@ class Settings:
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
     )
     gemini_model: str = field(
-        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+        default_factory=lambda: (
+            "gemini-2.5-flash"
+            if not os.getenv("GEMINI_MODEL", "").strip()
+            or os.getenv("GEMINI_MODEL", "").strip() in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "3.5-flash-lite")
+            else os.getenv("GEMINI_MODEL", "").strip()
+        )
     )
     mock_ai: bool = field(
         default_factory=lambda: os.getenv("MOCK_AI", "false").lower()

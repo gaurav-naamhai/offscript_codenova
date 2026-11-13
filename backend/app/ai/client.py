@@ -70,6 +70,7 @@ class GeminiClient:
         model: Optional[str] = None,
         mock_mode: Optional[bool] = None,
         settings: Optional[Settings] = None,
+        http_options: Optional[Dict[str, Any]] = None,
     ):
         cfg = settings or Settings()
 
@@ -79,7 +80,11 @@ class GeminiClient:
         else:
             self.mock_mode = bool(cfg.mock_ai)
 
-        self.model = model or cfg.gemini_model or "gemini-2.5-flash"
+        raw_model = model or cfg.gemini_model or "gemini-2.5-flash"
+        if raw_model in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "3.5-flash-lite"):
+            raw_model = "gemini-2.5-flash"
+        self.model = raw_model
+
         raw_key = api_key or cfg.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
         self._api_key = raw_key.strip() if raw_key else ""
 
@@ -99,9 +104,17 @@ class GeminiClient:
                 )
             try:
                 from google import genai
-                self._genai_client = genai.Client(api_key=self._api_key)
+
+                client_http_options: Dict[str, Any] = {"api_version": "v1beta"}
+                if http_options:
+                    client_http_options.update(http_options)
+
+                self._genai_client = genai.Client(
+                    api_key=self._api_key,
+                    http_options=client_http_options,
+                )
                 logger.info(
-                    "GeminiClient initialized in LIVE MODE for model '%s' (Key: %s)",
+                    "GeminiClient initialized in LIVE MODE for model '%s' (Key: %s, API: v1beta)",
                     self.model,
                     self.masked_api_key(),
                 )
@@ -180,6 +193,7 @@ class GeminiClient:
         config_args: Dict[str, Any] = {
             "response_mime_type": "application/json",
             "response_schema": response_schema,
+            "http_options": {"api_version": "v1beta"},
         }
         if system_instruction:
             config_args["system_instruction"] = system_instruction

@@ -271,6 +271,7 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
+                http_options={"api_version": "v1beta"},
             ),
         )
         parsed = json.loads(res.text or "{}")
@@ -351,6 +352,7 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,
+                    http_options={"api_version": "v1beta"},
                 ),
             )
             verdict = json.loads(eval_res.text or "{}")
