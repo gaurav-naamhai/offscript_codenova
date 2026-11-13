@@ -70,11 +70,12 @@ def run_pipeline(
         flags.append(_make_error_flag("retrieval", submission_id, version, now_iso))
 
     # 2. Verification
+    candidate_drafts: List[FlagDraft] = []
     try:
         raw_claims = v_fn(content)
         if not isinstance(raw_claims, list) or not all(isinstance(i, FlagDraft) for i in raw_claims):
             raise TypeError("verify_claims must return list[FlagDraft]")
-        flags.extend(_draft_to_flag(d, submission_id, version, now_iso) for d in raw_claims)
+        candidate_drafts.extend(raw_claims)
     except Exception as exc:
         logger.error("Plugin 'verification' failed: %s", exc, exc_info=True)
         degraded_modules.append(DegradedModule(module="verification", error=type(exc).__name__))
@@ -85,10 +86,18 @@ def run_pipeline(
         raw_brands = b_fn(content, guidelines)
         if not isinstance(raw_brands, list) or not all(isinstance(i, FlagDraft) for i in raw_brands):
             raise TypeError("check_brand must return list[FlagDraft]")
-        flags.extend(_draft_to_flag(d, submission_id, version, now_iso) for d in raw_brands)
+        candidate_drafts.extend(raw_brands)
     except Exception as exc:
         logger.error("Plugin 'brand_check' failed: %s", exc, exc_info=True)
         degraded_modules.append(DegradedModule(module="brand_check", error=type(exc).__name__))
         flags.append(_make_error_flag("brand_check", submission_id, version, now_iso))
+
+    # 4. AI Flagging Synthesis & Deduplication
+    from app.ai.flagging import deduplicate_and_synthesize_flag_drafts
+
+    synthesized_drafts = deduplicate_and_synthesize_flag_drafts(
+        candidate_drafts, include_aligned=True
+    )
+    flags.extend(_draft_to_flag(d, submission_id, version, now_iso) for d in synthesized_drafts)
 
     return flags, degraded_modules
