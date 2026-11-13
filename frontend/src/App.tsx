@@ -3,6 +3,7 @@ import { loadRecords, newId, writeRecords } from './reviewStore'
 import type { ReviewRecord } from './reviewStore'
 import type { Draft } from './NewReview'
 import ReviewLibrary from './ReviewLibrary'
+import ServerDemo from './ServerDemo'
 import './App.css'
 import NewReview from './NewReview'
 
@@ -37,6 +38,7 @@ function StatusSummary({ records }: { records: ReviewRecord[] }) { const items: 
 function RecentReviews({ records, onLibrary, onOpen }: { records: ReviewRecord[]; onLibrary: () => void; onOpen: (id: string) => void }) { return <section className="panel desk"><div className="desk-heading"><h2>On your desk</h2><button className="reviews-link" onClick={onLibrary}>View all reviews <Icon name="arrow"/></button></div>{records.length ? <div className="table-scroll"><table><thead><tr><th>Draft</th><th>Format</th><th>Status</th></tr></thead><tbody>{records.slice(0, 2).map(record => <tr key={record.id}><td><button className="record-open" onClick={() => onOpen(record.id)}>{record.draft.title || 'Untitled draft'}</button></td><td>{record.draft.format}</td><td><span className="status lavender">{record.status}</span></td></tr>)}</tbody></table></div> : <p>No saved reviews yet. Start a review to add one.</p>}</section> }
 function InfoCards() { return <div className="info-cards"><section className="panel attention"><h2>Needs your attention</h2><div className="info-content"><Icon name="alert"/><div><p>Demo guidance only</p><span className="card-link">Review findings <Icon name="arrow"/><small>Coming soon</small></span></div></div></section><section className="panel knowledge"><h2>Brand knowledge</h2><div className="info-content"><Icon name="book"/><div><p>Mailchimp style guide</p><span className="card-link">View approved guidance <Icon name="arrow"/><small>Coming soon</small></span></div></div></section></div> }
 function App() {
+  const [mode, setMode] = useState<'local' | 'server'>('local')
   const [loaded] = useState(loadRecords)
   const [records, setRecords] = useState<ReviewRecord[]>(loaded.records)
   const [error, setError] = useState(loaded.error)
@@ -57,6 +59,6 @@ function App() {
   }
   function remove(id: string) { persist(records.filter(record => record.id !== id)); setFiles(current => { const next = { ...current }; delete next[id]; return next }) }
   const active = records.find(record => record.id === activeId)
-  return <div className="app" id="dashboard"><Sidebar page={page} onNavigate={navigate}/><main className="main"><Header page={page}/>{error && <div className="storage-error" role="alert">{error}</div>}{page === 'review' ? <NewReview key={formKey} record={active} sessionFile={activeId ? files[activeId] ?? null : null} onSave={save}/> : page === 'library' ? <ReviewLibrary records={sorted} onOpen={open} onDelete={remove} onNew={() => navigate('review')}/> : <><Hero onStart={() => navigate('review')} onLibrary={() => navigate('library')}/><StatusSummary records={sorted}/><div className="dashboard-grid"><RecentReviews records={sorted} onLibrary={() => navigate('library')} onOpen={open}/><InfoCards/></div></>}</main></div>
+  return <div className="app" id="dashboard"><Sidebar page={page} onNavigate={navigate}/><main className="main"><Header page={page}/><div className="mode-switch" role="group" aria-label="Data mode"><button type="button" aria-pressed={mode === 'local'} onClick={() => { setMode('local'); setPage('dashboard') }}>Local demo</button><button type="button" aria-pressed={mode === 'server'} onClick={() => { setMode('server'); setPage('dashboard') }}>Server demo</button></div>{mode === 'server' ? <ServerDemo page={page} navigate={setPage}/> : <>{error && <div className="storage-error" role="alert">{error}</div>}{page === 'review' ? <NewReview key={formKey} record={active} sessionFile={activeId ? files[activeId] ?? null : null} onSave={save}/> : page === 'library' ? <ReviewLibrary records={sorted} onOpen={open} onDelete={remove} onNew={() => navigate('review')}/> : <><Hero onStart={() => navigate('review')} onLibrary={() => navigate('library')}/><StatusSummary records={sorted}/><div className="dashboard-grid"><RecentReviews records={sorted} onLibrary={() => navigate('library')} onOpen={open}/><InfoCards/></div></>}</>}</main></div>
 }
 export default App
