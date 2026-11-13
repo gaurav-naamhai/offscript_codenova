@@ -146,6 +146,102 @@ def synthesize_flag_drafts(
     return drafts
 
 
+def deduplicate_and_synthesize_flag_drafts(
+    drafts: List[FlagDraft],
+    include_aligned: bool = True,
+) -> List[FlagDraft]:
+    """Deduplicate, prioritize, and synthesize flag drafts from multiple review modules.
+
+    Merges duplicate findings on identical passages and locations while preserving:
+    - All external sources
+    - All guideline references
+    - Actionable suggested corrections
+    - Uncertainty notes
+    """
+    seen: Dict[Tuple[str, str, str, str], FlagDraft] = {}
+    deduped_order: List[FlagDraft] = []
+
+    for d in drafts:
+        if not include_aligned and d.state in ("aligned", "supported"):
+            continue
+
+        passage_norm = d.passage.strip().lower()
+        if passage_norm:
+            key = (
+                d.finding_type,
+                passage_norm,
+                d.location.strip().lower(),
+                d.state,
+            )
+        else:
+            # When passage is empty (e.g. document-level flags), distinguish by explanation
+            key = (
+                d.finding_type,
+                d.explanation.strip().lower(),
+                d.location.strip().lower(),
+                d.state,
+            )
+
+        if key in seen:
+            existing = seen[key]
+            # Merge external sources without duplicating URLs
+            existing_urls = {s.url for s in existing.external_sources}
+            for s in d.external_sources:
+                if s.url not in existing_urls:
+                    existing.external_sources.append(s)
+                    existing_urls.add(s.url)
+
+            # Merge guideline refs without duplicating (document, passage_ref)
+            existing_g_keys = {
+                (g.document, g.passage_ref) for g in existing.guideline_refs
+            }
+            for g in d.guideline_refs:
+                if (g.document, g.passage_ref) not in existing_g_keys:
+                    existing.guideline_refs.append(g)
+                    existing_g_keys.add((g.document, g.passage_ref))
+
+            if not existing.guideline_ref and d.guideline_ref:
+                existing.guideline_ref = d.guideline_ref
+
+            # Preserve suggested correction if existing lacks it
+            if not existing.suggested_correction and d.suggested_correction:
+                existing.suggested_correction = d.suggested_correction
+
+            # Preserve uncertainty note if existing lacks it
+            if not existing.uncertainty_note and d.uncertainty_note:
+                existing.uncertainty_note = d.uncertainty_note
+        else:
+            # Make a clean copy of the draft so we don't mutate input objects unexpectedly
+            draft_copy = FlagDraft(
+                finding_type=d.finding_type,
+                state=d.state,
+                passage=d.passage,
+                location=d.location,
+                explanation=d.explanation,
+                why_it_matters=d.why_it_matters,
+                guideline_ref=d.guideline_ref,
+                guideline_refs=list(d.guideline_refs or ([d.guideline_ref] if d.guideline_ref else [])),
+                external_sources=list(d.external_sources or []),
+                uncertainty_note=d.uncertainty_note,
+                suggested_correction=d.suggested_correction,
+                origin=d.origin,
+                status=d.status,
+                comments=list(d.comments or []),
+            )
+            seen[key] = draft_copy
+            deduped_order.append(draft_copy)
+
+    def sort_key(d: FlagDraft) -> int:
+        if d.state in ("contradicted", "potential_issue"):
+            return 0
+        if d.state in ("unclear", "insufficient_evidence") or needs_human(d.state):
+            return 1
+        return 2
+
+    deduped_order.sort(key=sort_key)
+    return deduped_order
+
+
 def consolidate_flags(
     brand_output: Optional[BrandVerificationOutput] = None,
     claim_output: Optional[ClaimVerificationOutput] = None,

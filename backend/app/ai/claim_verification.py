@@ -21,7 +21,7 @@ from app.ai.schemas import (
     ExtractedClaim,
 )
 from app.config import Settings
-from app.models import ContentPayload, ExternalSource
+from app.models import ContentPayload, ExternalSource, FlagDraft
 from app.uncertainty import needs_human
 
 logger = logging.getLogger(__name__)
@@ -160,8 +160,8 @@ def verify_claims_against_evidence(
     resolved_evidence: Dict[str, List[Any]] = dict(evidence_map or {})
     all_evidence_items: List[Any] = []
 
-    # If evidence was not pre-supplied, use Ken's retrieval interface to fetch live evidence
-    if auto_fetch_evidence and not evidence_map and not ai_client.mock_mode:
+    # If evidence was not pre-supplied, use Ken's retrieval interface to fetch live/mock evidence
+    if auto_fetch_evidence and not evidence_map:
         try:
             from retrieval.external_search import verify_claim_externally
 
@@ -255,6 +255,38 @@ def verify_claims(
         evidence_map=evidence_map,
         client=client,
         auto_fetch_evidence=True,
+    )
+
+
+def claim_finding_to_flag_draft(finding: ClaimFinding) -> FlagDraft:
+    """Convert a ClaimFinding directly to Gaurav's domain FlagDraft model.
+
+    Ensures seamless compatibility with backend/app/pipeline.py and repository.
+    """
+    ext_sources = list(finding.external_sources)
+    if not ext_sources and finding.evidence_source_url and finding.evidence_excerpt:
+        ext_sources = [
+            ExternalSource(
+                url=finding.evidence_source_url,
+                excerpt=finding.evidence_excerpt,
+            )
+        ]
+
+    return FlagDraft(
+        finding_type="claim",
+        state=finding.state,
+        passage=finding.passage,
+        location=finding.location,
+        explanation=finding.explanation,
+        why_it_matters=finding.why_it_matters,
+        guideline_ref=None,
+        guideline_refs=[],
+        external_sources=ext_sources,
+        uncertainty_note=finding.uncertainty_note,
+        suggested_correction=finding.suggested_fix,
+        origin="module",
+        status="open",
+        comments=[],
     )
 
 
@@ -393,7 +425,7 @@ def _generate_mock_claim_verification(
 
             # Check direct contradiction: evidence explicitly refutes the claim
             is_contradicted = any(
-                "contradicts" in getattr(e, "excerpt", "").lower() or "refuted" in getattr(e, "excerpt", "").lower()
+                "contradict" in getattr(e, "excerpt", "").lower() or "refut" in getattr(e, "excerpt", "").lower()
                 or ("#1" in text and "multiple leaders" in getattr(e, "excerpt", "").lower())
                 for e in ev_items
             )

@@ -636,11 +636,31 @@ def create_app(
             {"guideline": g, "count": c}
             for g, c in guideline_counts.most_common(10)
         ]
+
+        # Connect historical flags to Sera's Governance Intelligence
+        gov_dict = None
+        try:
+            from app.ai.governance_intelligence import generate_governance_insights
+
+            gov_out = generate_governance_insights(flags=all_flags)
+            gov_dict = gov_out.model_dump()
+        except Exception as exc:
+            logger.warning("Governance insights generation failed: %s", exc)
+
         return RecurringInsightsResponse(
             top_guidelines=top_guidelines,
             state_counts=dict(state_counts),
             total_flags=len(all_flags),
+            governance_insights=gov_dict,
         )
+
+    @app.get("/insights/governance")
+    async def governance_insights():
+        """Generate executive governance intelligence from historical compliance flags."""
+        all_flags = await app_repo.get_all_flags()
+        from app.ai.governance_intelligence import generate_governance_insights
+
+        return generate_governance_insights(flags=all_flags)
 
     @app.get("/disclosures", response_model=DisclosuresResponse)
     async def get_disclosures():

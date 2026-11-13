@@ -1,7 +1,7 @@
 """Data models and schemas for the compliance review backend."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 RoleType = Literal["creator", "manager", "authorised_reviewer"]
@@ -188,6 +188,7 @@ class RecurringInsightsResponse(BaseModel):
     top_guidelines: List[Dict[str, object]]
     state_counts: Dict[str, int]
     total_flags: int
+    governance_insights: Optional[Dict[str, Any]] = None
 
 
 class DisclosureItem(BaseModel):

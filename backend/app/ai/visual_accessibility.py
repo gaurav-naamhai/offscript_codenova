@@ -183,10 +183,73 @@ def analyze_visual_accessibility(
     """
     ai_client = client or GeminiClient(settings=Settings())
 
-    # 1. Gracefully handle non-visual or text-only submissions
+    # 1. Handle PDF assets: attempt actual page rendering to image bytes
+    is_pdf = (content.content_type == "pdf") or (
+        bool(content.file_mime and "pdf" in content.file_mime.lower())
+    )
+    if is_pdf:
+        if not (content.file_bytes and len(content.file_bytes) > 0):
+            return VisualAccessibilityOutput(
+                has_visual_content=False,
+                detected_logos=[],
+                color_palette=[],
+                visual_consistency_score="not_applicable",
+                visual_brand_alignment="unclear",
+                visual_brand_notes="PDF submission contains empty or missing file bytes. Visual accessibility could not be checked.",
+                accessibility_issues=[],
+                needs_human=True,
+                uncertainty_note="Missing PDF file bytes for visual analysis. Human review required.",
+            )
+
+        rendered_png_bytes = None
+        try:
+            import pymupdf
+            doc = pymupdf.open(stream=content.file_bytes, filetype="pdf")
+            if len(doc) > 0:
+                page = doc.load_page(0)
+                pix = page.get_pixmap(dpi=150)
+                rendered_png_bytes = pix.tobytes("png")
+        except Exception as exc:
+            logger.warning("PDF page rendering via pymupdf failed: %s", exc)
+            rendered_png_bytes = None
+
+        if not rendered_png_bytes:
+            return VisualAccessibilityOutput(
+                has_visual_content=False,
+                detected_logos=[],
+                color_palette=[],
+                visual_consistency_score="not_applicable",
+                visual_brand_alignment="unclear",
+                visual_brand_notes="PDF visual layout and contrast could not be rendered for automated accessibility analysis.",
+                accessibility_issues=[],
+                needs_human=True,
+                uncertainty_note="PDF page rendering failed or was unavailable. Manual accessibility and visual inspection is required.",
+            )
+
+        # Successfully rendered first page! Analyze as rendered image payload
+        rendered_content = ContentPayload(
+            content_type="image",
+            file_name=f"{content.file_name or 'document'}_page1.png",
+            file_mime="image/png",
+            file_bytes=rendered_png_bytes,
+            text=content.text,
+        )
+        pdf_output = analyze_visual_accessibility(
+            content=rendered_content,
+            guidelines=guidelines,
+            client=ai_client,
+        )
+        prefix = "[Rendered PDF Page 1] "
+        if pdf_output.visual_brand_notes:
+            pdf_output.visual_brand_notes = f"{prefix}{pdf_output.visual_brand_notes}"
+        else:
+            pdf_output.visual_brand_notes = f"{prefix}Visual layout and accessibility evaluated."
+        return pdf_output
+
+    # 2. Gracefully handle non-visual or text-only submissions
     has_bytes = bool(content.file_bytes and len(content.file_bytes) > 0)
     is_image_type = (content.content_type == "image") or (
-        content.file_mime and content.file_mime.startswith("image/")
+        bool(content.file_mime and content.file_mime.startswith("image/"))
     )
 
     if not has_bytes or not is_image_type:
