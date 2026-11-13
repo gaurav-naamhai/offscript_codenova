@@ -19,7 +19,6 @@ export default function ReviewWorkspace({
   const [audit, setAudit] = useState<AuditEvent[]>([])
   const [fileUrl, setFileUrl] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [filter, setFilter] = useState<'All' | 'Brand' | 'Claims'>('All')
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
   const [commentText, setCommentText] = useState('')
@@ -197,8 +196,55 @@ export default function ReviewWorkspace({
 
   const sub = detail.submission
   const flags = detail.flags
-  const visibleFlags = flags.filter(f => filter === 'All' || (filter === 'Brand' ? f.finding_type === 'brand' : f.finding_type === 'claim'))
+  const otherChecks = flags.filter(f => ['aligned', 'supported'].includes(f.state) && f.origin !== 'error')
+  const findings = flags.filter(f => !otherChecks.includes(f))
+  const label = (state: string) => ({ aligned: 'Aligned', supported: 'Supported', potential_issue: 'Potential issue', unclear: 'Unclear', contradicted: 'Contradicted', insufficient_evidence: 'Insufficient evidence' } as Record<string, string>)[state] || state.replaceAll('_', ' ')
   const selectedFlag = flags.find(f => f.id === selectedId)
+
+  const renderFinding = (f: ServerFlag) => (
+              <article className="finding" key={f.id}>
+                <button
+                  className="finding-select"
+                  type="button"
+                  aria-pressed={selectedId === f.id}
+                  onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
+                >
+                  <strong>{f.finding_type === 'brand' ? 'Brand' : 'Claim'}: {label(f.state)}</strong>
+                  <span>{f.status.toUpperCase()}</span>
+                </button>
+
+                <div className="finding-detail">
+                    {f.origin === 'error' && <p className="stale-label">Check incomplete.</p>}
+                    {f.origin === 'fixture' && <p>Placeholder check.</p>}
+                    {(f as ServerFlag & { uncertainty_note?: string }).uncertainty_note && <p><strong>Uncertainty:</strong> {(f as ServerFlag & { uncertainty_note?: string }).uncertainty_note}</p>}
+                    {f.passage && <p><strong>Affected text:</strong> <mark>{f.passage}</mark></p>}
+                    {f.suggested_correction && <p><strong>Suggested correction:</strong> {f.suggested_correction}</p>}
+                    <details><summary>Why this was flagged</summary>
+                    <p><strong>Explanation:</strong> {f.explanation}</p>
+                    <p><strong>Why it matters:</strong> {f.why_it_matters}</p>
+                    {((f as ServerFlag & { guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }).guideline_refs?.length ? (f as ServerFlag & { guideline_refs: NonNullable<ServerFlag['guideline_ref']>[] }).guideline_refs : f.guideline_ref ? [f.guideline_ref] : []).map((ref, index) => <p className="source-excerpt" key={index}><strong>Guideline reference:</strong> {ref.document} ({ref.passage_ref})<br/><em>{ref.excerpt}</em>{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>)}
+                    {f.external_sources && f.external_sources.length > 0 && (
+                      <div className="source-excerpt">
+                        <strong>External evidence:</strong>
+                        {f.external_sources.map((s, sIdx) => (
+                          <div key={sIdx}>
+                            <a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>: "{s.excerpt}"
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    </details>
+                    <div className="workspace-actions">
+                      {f.status === 'open' && <>
+                        {f.suggested_correction && sub.content_type === 'text' && <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>Apply suggestion</button>}
+                        <button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss</button>
+                        {sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}
+                      </>}
+                    </div>
+                    {recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}
+                </div>
+              </article>
+  )
 
   return (
     <div className="review-workspace">
@@ -286,17 +332,8 @@ export default function ReviewWorkspace({
           {sub.content_type === 'text' && sub.status === 'draft' && !editing && (
             <div className="workspace-actions" style={{ marginTop: '12px' }}>
               <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }}>
-                Edit draft
+                Edit manually
               </button>
-            </div>
-          )}
-
-          {(sub.audience || sub.channel || sub.context) && (
-            <div className="changes" style={{ marginTop: '16px' }}>
-              <h3>Governance context</h3>
-              {sub.audience && <p><strong>Audience:</strong> {sub.audience}</p>}
-              {sub.channel && <p><strong>Purpose / Channel:</strong> {sub.channel}</p>}
-              {sub.context && <p><strong>Notes:</strong> {sub.context}</p>}
             </div>
           )}
 
@@ -334,113 +371,15 @@ export default function ReviewWorkspace({
         {/* Right column: Findings & Evidence */}
         <section className="panel workspace-panel">
           <h2>Findings &amp; evidence</h2>
-          <div className="workspace-tabs" role="group" aria-label="Filter findings">
-            {(['All', 'Brand', 'Claims'] as const).map(tab => (
-              <button
-                type="button"
-                aria-pressed={filter === tab}
-                className={filter === tab ? 'selected' : ''}
-                onClick={() => setFilter(tab)}
-                key={tab}
-              >
-                {tab}
-              </button>
-            ))}
-          </div>
-
-          {flags.length === 0 ? (
-            <p style={{ marginTop: '16px' }}>
-              {sub.status === 'draft'
-                ? 'No checks run yet. Click "Run Compliance Check" below to evaluate.'
-                : 'Zero findings recorded for this submission.'}
-            </p>
-          ) : visibleFlags.length === 0 ? (
-            <p style={{ marginTop: '16px' }}>No findings match the "{filter}" filter.</p>
-          ) : (
-            visibleFlags.map(f => (
-              <article className="finding" key={f.id}>
-                <button
-                  className="finding-select"
-                  type="button"
-                  aria-expanded={selectedId === f.id}
-                  onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
-                >
-                  <strong>{f.finding_type.toUpperCase()}: {f.state.replace('_', ' ')}</strong>
-                  <span>{f.status.toUpperCase()}</span>
-                </button>
-
-                {selectedId === f.id && (
-                  <div className="finding-detail">
-                    <p><strong>Explanation:</strong> {f.explanation}</p>
-                    <p><strong>Why it matters:</strong> {f.why_it_matters}</p>
-                    {f.passage && (
-                      <p>
-                        <strong>Passage:</strong> <mark>{f.passage}</mark> · <small>{f.location}</small>
-                      </p>
-                    )}
-                    {f.guideline_ref && (
-                      <p className="source-excerpt">
-                        <strong>Guideline violated:</strong> {f.guideline_ref.document} ({f.guideline_ref.passage_ref})<br/>
-                        <em>"{f.guideline_ref.excerpt}"</em>
-                      </p>
-                    )}
-                    {f.external_sources && f.external_sources.length > 0 && (
-                      <div className="source-excerpt">
-                        <strong>External evidence:</strong>
-                        {f.external_sources.map((s, sIdx) => (
-                          <div key={sIdx}>
-                            <a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>: "{s.excerpt}"
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {f.suggested_correction && (
-                      <p><strong>Suggested correction:</strong> {f.suggested_correction}</p>
-                    )}
-
-                    <div className="workspace-actions">
-                      {f.status === 'open' && (
-                        <>
-                          {f.suggested_correction && sub.content_type === 'text' && (
-                            <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>
-                              Apply suggestion
-                            </button>
-                          )}
-                          <button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>
-                            Dismiss
-                          </button>
-                          {sub.content_type === 'text' && (
-                            <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>
-                              Preview recheck
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-
-                    {recheckPreview && recheckPreview.flagId === f.id && (
-                      <div className="source-excerpt" style={{ marginTop: '10px' }}>
-                        <strong>Recheck Simulation Result:</strong>
-                        <p>
-                          Original issue resolved:{' '}
-                          <strong>{recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</strong>
-                        </p>
-                        <p>
-                          Remaining findings: {recheckPreview.result.new_flags.length} (
-                          {recheckPreview.result.has_needs_human ? 'Requires human review' : 'Aligned'}
-                          )
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </article>
-            ))
-          )}
+          {flags.length === 0 && <p>No findings returned. This does not mean the whole draft passed.</p>}
+          {flags.some(f => f.origin === 'error') && <p className="stale-label" role="status">Some checks are incomplete. Review the findings below.</p>}
+          {flags.some(f => f.origin === 'fixture') && <p>Some findings come from placeholder checks.</p>}
+          {findings.map(renderFinding)}
+          {otherChecks.length > 0 && <details><summary>Other checks ({otherChecks.length})</summary><p>These results do not establish that the whole draft passed.</p>{otherChecks.map(renderFinding)}</details>}
 
           {/* Comments section */}
-          <section className="local-records">
-            <h3>Review Comments</h3>
+          <details className="local-records">
+            <summary>Review comments</summary>
             <label htmlFor="comment">Add review feedback</label>
             <textarea
               id="comment"
@@ -467,7 +406,7 @@ export default function ReviewWorkspace({
                 ))}
               </ul>
             )}
-          </section>
+          </details>
         </section>
       </div>
 

@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent } from 'react'
-import { demoChannels, demoGuidance } from './demoData'
 import './NewReview.css'
-import { readGuidanceDocuments } from './knowledgeData'
 import { serverApi } from './serverApi'
 import type { ContentType } from './serverApi'
 
@@ -80,31 +78,6 @@ function DraftPreview({ draft, file, url }: { draft: Draft; file: File | null; u
   )
 }
 
-function GuidanceCard({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const { docs, error } = readGuidanceDocuments()
-  const known = value === 'No brand guidance' || demoGuidance.includes(value as typeof demoGuidance[number]) || docs.some(doc => `document:${doc.id}` === value)
-  return (
-    <section className="panel guidance-card">
-      <h2>Review against</h2>
-      <label htmlFor="guidance">Guidance reference</label>
-      <select id="guidance" value={value} onChange={event => onChange(event.target.value)}>
-        <option value="No brand guidance">Standard Brand Voice Guidelines v2.1</option>
-        <optgroup label="Sample guidance">
-          {demoGuidance.filter(option => option !== 'No brand guidance').map(option => <option value={option} key={option}>Sample · {option}</option>)}
-        </optgroup>
-        {docs.length > 0 && (
-          <optgroup label="Your documents">
-            {docs.map(doc => <option value={`document:${doc.id}`} key={doc.id}>{doc.title}</option>)}
-          </optgroup>
-        )}
-        {!known && <option value={value}>Previously saved selection</option>}
-      </select>
-      {error && <p role="status">{error}</p>}
-      <p>Checks are run against approved Brand Tone &amp; Claim Compliance standards.</p>
-    </section>
-  )
-}
-
 export default function NewReview({ onCreated }: { onCreated: (id: string) => void }) {
   const [draft, setDraft] = useState<Draft>(emptyDraft)
   const [files, setFiles] = useState<Files>({ Image: null, PDF: null })
@@ -135,11 +108,8 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
 
   async function submitForReview() {
     const next: string[] = []
-    if (!draft.title.trim()) next.push('Enter a draft title.')
     if (draft.format === 'Text' && !draft.text.trim()) next.push('Enter content to review.')
     if (draft.format !== 'Text' && !currentFile) next.push(`Choose a ${draft.format} file.`)
-    if (!draft.audience.trim()) next.push('Enter an audience.')
-    if (!draft.channel) next.push('Choose a purpose / channel.')
     if (fileError) next.push('Choose a supported file type or remove the invalid selection.')
     setErrors(next)
     if (next.length > 0) return
@@ -171,15 +141,15 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
     <div className="new-review">
       <header className="review-intro">
         <h1>Bring your next draft.</h1>
-        <p>Add your content and context. Review it against brand governance before it goes public.</p>
+        <p>Add your content for review before it goes public.</p>
       </header>
       <div className="review-layout">
         <section className="panel review-form">
           <h2>What would you like to review?</h2>
           <FormatTabs value={draft.format} onChange={value => { update('format', value); setFileError('') }}/>
           <div className="field">
-            <label htmlFor="draft-title">Draft title <span aria-hidden="true">*</span></label>
-            <input id="draft-title" value={draft.title} onChange={event => update('title', event.target.value)} placeholder="e.g. Q4 Product Announcement" required disabled={busy}/>
+            <label htmlFor="draft-title">Title (optional)</label>
+            <input id="draft-title" value={draft.title} onChange={event => update('title', event.target.value)} placeholder="e.g. Q4 Product Announcement" disabled={busy}/>
           </div>
           {draft.format === 'Text' ? (
             <div className="field">
@@ -190,27 +160,10 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
           ) : (
             <FilePicker format={draft.format} file={currentFile} onFile={file => setFile(draft.format as 'Image' | 'PDF', file)} error={fileError}/>
           )}
-          <div className="field-row">
-            <div className="field">
-              <label htmlFor="audience">Audience <span aria-hidden="true">*</span></label>
-              <input id="audience" value={draft.audience} onChange={event => update('audience', event.target.value)} placeholder="e.g. Small business owners" required disabled={busy}/>
-            </div>
-            <div className="field">
-              <label htmlFor="channel">Purpose / channel <span aria-hidden="true">*</span></label>
-              <select id="channel" value={draft.channel} onChange={event => update('channel', event.target.value)} required disabled={busy}>
-                <option value="">Select a channel</option>
-                {demoChannels.map(channel => <option key={channel}>{channel}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="field">
-            <label htmlFor="context">Additional context <span className="optional">(optional)</span></label>
-            <textarea id="context" rows={2} value={draft.context} onChange={event => update('context', event.target.value)} placeholder="Anything the reviewer should know?" disabled={busy}/>
-          </div>
         </section>
         <div className="review-side">
           <DraftPreview draft={draft} file={currentFile} url={currentUrl}/>
-          <GuidanceCard value={draft.guidance} onChange={value => update('guidance', value)}/>
+          <p>Guidelines are selected by the review service. Sources used are shown with the results when available.</p>
         </div>
       </div>
       {statusMessage && <p className="save-feedback" role="status">{statusMessage}</p>}
@@ -221,7 +174,7 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
         </div>
       )}
       <div className="review-footer">
-        <p>Checks evaluate tone compliance, buzzwords, and verifiable claim benchmarks.</p>
+        <p>Results may include placeholder checks or incomplete checks.</p>
         <div>
           <button type="button" className="primary-button" onClick={submitForReview} disabled={busy}>
             {busy ? 'Running compliance check...' : 'Submit for review'} <span aria-hidden="true">→</span>
