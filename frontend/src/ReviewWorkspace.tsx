@@ -3,14 +3,28 @@ import { serverApi } from './serverApi'
 import type { AuditEvent, RecheckResult, ServerDetail, ServerFlag, VersionInfo } from './serverApi'
 import './ReviewWorkspace.css'
 
-function CorrectionText({ original, correction }: { original: string; correction: string }) {
-  const before = original.match(/\S+\s*|\s+/g) || []
-  const after = correction.match(/\S+\s*|\s+/g) || []
-  let start = 0
-  while (start < before.length && start < after.length && before[start] === after[start]) start++
-  let end = 0
-  while (end < before.length - start && end < after.length - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++
-  return <>{after.slice(0, start).join('')}<strong className="correction-change">{after.slice(start, after.length - end).join('')}</strong>{end > 0 && after.slice(-end).join('')}</>
+function compareText(original: string, correction: string) {
+  const tokenize = (text: string) => text.match(/[\p{L}\p{M}\p{N}]+|[^\p{L}\p{M}\p{N}\s]|\s+/gu) || []
+  const before = tokenize(original), after = tokenize(correction)
+  const removed = new Set<number>(), added = new Set<number>()
+  // Avoid expensive comparisons for unusually long passages.
+  if (before.length * after.length > 1_000_000) return { before, after, removed, added }
+  const rows = Array.from({ length: before.length + 1 }, () => new Uint32Array(after.length + 1))
+  for (let i = before.length - 1; i >= 0; i--) for (let j = after.length - 1; j >= 0; j--)
+    rows[i][j] = before[i] === after[j] ? 1 + rows[i + 1][j + 1] : Math.max(rows[i + 1][j], rows[i][j + 1])
+  let i = 0, j = 0
+  while (i < before.length && j < after.length) {
+    if (before[i] === after[j]) { i++; j++ }
+    else if (rows[i + 1][j] >= rows[i][j + 1]) { removed.add(i++); }
+    else { added.add(j++); }
+  }
+  while (i < before.length) removed.add(i++)
+  while (j < after.length) added.add(j++)
+  return { before, after, removed, added }
+}
+
+function DiffText({ tokens, changes, kind }: { tokens: string[]; changes: Set<number>; kind: 'removed' | 'added' }) {
+  return <>{tokens.map((token, index) => changes.has(index) && !/^\s+$/.test(token) ? <span className={`diff-${kind}`} key={index}>{token}</span> : token)}</>
 }
 
 export default function ReviewWorkspace({
@@ -217,6 +231,8 @@ export default function ReviewWorkspace({
     const wholeDraft = f.passage.trim().toLowerCase() === '(whole submission)'
     const incomplete = f.origin === 'error'
     const canEdit = sub.content_type === 'text' && sub.status === 'draft'
+    const showDiff = !!f.suggested_correction && !!f.passage && !wholeDraft && !incomplete && f.state !== 'unclear' && f.state !== 'insufficient_evidence' && !extra.uncertainty_note
+    const diff = showDiff ? compareText(f.passage, f.suggested_correction!) : null
     return <article className={`finding${incomplete ? ' finding-incomplete' : ''}`} key={f.id}>
       <div className="finding-detail">
         <div className="finding-heading"><strong>{incomplete ? 'Review incomplete' : f.state === 'insufficient_evidence' ? 'Needs supporting evidence' : `${f.finding_type === 'brand' ? 'Brand' : 'Claim'}: ${label(f.state)}`}</strong><span className="finding-status">{f.status.replaceAll('_', ' ')}</span></div>
@@ -224,8 +240,8 @@ export default function ReviewWorkspace({
         {extra.uncertainty_note && <p className="finding-note"><strong>Uncertainty:</strong> {extra.uncertainty_note}</p>}
         {f.needs_human && <p className="finding-note">Human review required.</p>}
         {!incomplete && <>
-          {wholeDraft ? <p>Applies to the whole draft</p> : f.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={selectedId === f.id} onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}>{f.passage}</button></div> : <p>Exact text location unavailable.</p>}
-          {f.suggested_correction && <div className="finding-copy"><strong>Suggested correction</strong><p><CorrectionText original={wholeDraft ? '' : f.passage} correction={f.suggested_correction}/></p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}
+          {wholeDraft ? <p>Applies to the whole draft</p> : f.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={selectedId === f.id} onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}>{diff ? <DiffText tokens={diff.before} changes={diff.removed} kind="removed"/> : f.passage}</button></div> : <p>Exact text location unavailable.</p>}
+          {f.suggested_correction && <div className="finding-copy"><strong>Suggested correction</strong><p>{diff ? <DiffText tokens={diff.after} changes={diff.added} kind="added"/> : f.suggested_correction}</p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}
         </>}
         <details className="finding-source"><summary>ⓘ Source &amp; explanation</summary>
           <p>{f.explanation}</p><p>{f.why_it_matters}</p>
