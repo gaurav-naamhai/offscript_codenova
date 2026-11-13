@@ -101,9 +101,35 @@ def _fallback_verify(content: ContentPayload) -> List[FlagDraft]:
     return flags
 
 
-def verify_claims(content: ContentPayload) -> List[FlagDraft]:
-    """Verify factual claims against external sources."""
+def verify_claims(
+    content: ContentPayload,
+    client: Optional[object] = None,
+) -> List[FlagDraft]:
+    """Verify factual claims against external sources.
+
+    In AI mode (MOCK_AI=true or GEMINI_API_KEY present):
+    Executes Sera's Claim Verification (app.ai.claim_verification) with evidence
+    retrieved via Ken's external search (retrieval.external_search).
+
+    In offline fixture mode:
+    Falls back to deterministic regex RULES with origin='fixture'.
+    """
     try:
+        from app.config import Settings
+        settings = Settings()
+        use_ai = (client is not None) or settings.mock_ai or bool(settings.gemini_api_key)
+
+        if use_ai:
+            from app.ai.claim_verification import (
+                claim_finding_to_flag_draft,
+                verify_claims as ai_verify_claims,
+            )
+            # Route through Sera's claim verification using Ken's external search
+            claim_output = ai_verify_claims(content, client=client)  # type: ignore[arg-type]
+            flags = [claim_finding_to_flag_draft(f) for f in claim_output.findings]
+            if flags:
+                return flags
+
         from retrieval.config import EXA_API_KEY, GEMINI_API_KEY, TINYFISH_API_KEY
         if not (GEMINI_API_KEY and (EXA_API_KEY or TINYFISH_API_KEY)):
             return _fallback_verify(content)

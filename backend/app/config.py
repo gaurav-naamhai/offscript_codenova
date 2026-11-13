@@ -2,7 +2,26 @@
 
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
 from typing import List
+
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+
+    # Search current directory, backend directory, and repo root
+    _this_dir = Path(__file__).resolve().parent
+    _backend_env = _this_dir.parent / ".env"
+    _root_env = _this_dir.parent.parent / ".env"
+
+    if _backend_env.exists():
+        load_dotenv(_backend_env)
+    elif _root_env.exists():
+        load_dotenv(_root_env)
+    else:
+        load_dotenv()
+except ImportError:
+    pass
 
 
 @dataclass
@@ -17,7 +36,11 @@ class Settings:
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
     )
     gemini_model: str = field(
-        default_factory=lambda: os.getenv("GEMINI_MODEL", "")
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+    )
+    mock_ai: bool = field(
+        default_factory=lambda: os.getenv("MOCK_AI", "false").lower()
+        in ("true", "1", "yes")
     )
     exa_api_key: str = field(
         default_factory=lambda: os.getenv("EXA_API_KEY", "")
@@ -38,6 +61,10 @@ class Settings:
     external_services_enabled: str = field(
         default_factory=lambda: os.getenv("EXTERNAL_SERVICES_ENABLED", "")
     )
+
+    def __post_init__(self):
+        if not self.gemini_model:
+            self.gemini_model = "gemini-2.5-flash"
 
     @property
     def cors_origins(self) -> List[str]:
