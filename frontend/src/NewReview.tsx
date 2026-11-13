@@ -3,20 +3,12 @@ import type { ChangeEvent, DragEvent } from 'react'
 import { demoChannels, demoGuidance } from './demoData'
 import './NewReview.css'
 import ReviewWorkspace from './ReviewWorkspace'
+import type { ReviewRecord } from './reviewStore'
 
 type Format = 'Text' | 'Image' | 'PDF'
 export type Draft = { format: Format; title: string; text: string; audience: string; channel: string; context: string; guidance: string }
 type Files = Record<'Image' | 'PDF', File | null>
-const storageKey = 'inkloom-demo-draft'
 const emptyDraft: Draft = { format: 'Text', title: '', text: '', audience: '', channel: '', context: '', guidance: demoGuidance[0] }
-function loadDraft(): Draft {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(storageKey) || 'null')
-    if (!saved || typeof saved !== 'object') return emptyDraft
-    const data = saved as Partial<Draft>
-    return { format: data.format === 'Image' || data.format === 'PDF' ? data.format : 'Text', title: typeof data.title === 'string' ? data.title : '', text: typeof data.text === 'string' ? data.text : '', audience: typeof data.audience === 'string' ? data.audience : '', channel: typeof data.channel === 'string' ? data.channel : '', context: typeof data.context === 'string' ? data.context : '', guidance: typeof data.guidance === 'string' ? data.guidance : demoGuidance[0] }
-  } catch { return emptyDraft }
-}
 function useFileUrl(file: File | null) {
   const [url, setUrl] = useState('')
   useEffect(() => {
@@ -42,9 +34,9 @@ function DraftPreview({ draft, file, url }: { draft: Draft; file: File | null; u
 function GuidanceCard({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   return <section className="panel guidance-card"><h2>Review against</h2><label htmlFor="guidance">Demo brand guidance</label><select id="guidance" value={value} onChange={event => onChange(event.target.value)}>{demoGuidance.map(option => <option key={option}>{option}</option>)}</select><p>Demo selection only. No brand guidance is applied or analyzed.</p></section>
 }
-export default function NewReview() {
-  const [draft, setDraft] = useState<Draft>(loadDraft)
-  const [files, setFiles] = useState<Files>({ Image: null, PDF: null })
+export default function NewReview({ record, sessionFile, onSave }: { record?: ReviewRecord; sessionFile: File | null; onSave: (draft: Draft, status: ReviewRecord['status'], file: File | null, review?: ReviewRecord['review']) => { id: string; error: string } }) {
+  const [draft, setDraft] = useState<Draft>(record?.draft ?? emptyDraft)
+  const [files, setFiles] = useState<Files>({ Image: record?.draft.format === 'Image' ? sessionFile : null, PDF: record?.draft.format === 'PDF' ? sessionFile : null })
   const [errors, setErrors] = useState<string[]>([])
   const [fileError, setFileError] = useState('')
   const [feedback, setFeedback] = useState('')
@@ -60,8 +52,8 @@ export default function NewReview() {
     setFileError(''); setErrors([]); setFeedback(''); setFiles(previous => ({ ...previous, [format]: file }))
   }
   function saveDraft() {
-    try { localStorage.setItem(storageKey, JSON.stringify(draft)); setFeedback('Draft text and details saved in this browser. Files are not saved and must be selected again after refresh.') }
-    catch { setFeedback('Could not save locally. Check browser storage settings and try again.') }
+    const result = onSave(draft, record?.status ?? 'Draft', currentFile)
+    setFeedback(result.error || 'Draft text and details saved locally. Files are not saved and must be selected again after refresh.')
   }
   function preview() {
     const next: string[] = []
@@ -72,8 +64,8 @@ export default function NewReview() {
     if (!draft.channel) next.push('Choose a purpose / channel.')
     if (fileError) next.push('Choose a supported file type or remove the invalid selection.')
     setErrors(next)
-    if (!next.length) { setDemo(true); window.scrollTo(0, 0) }
+    if (!next.length) { const result = onSave(draft, 'Unreviewed', currentFile); setFeedback(result.error); setDemo(true); window.scrollTo(0, 0) }
   }
-  if (demo) return <ReviewWorkspace submitted={draft} file={currentFile} url={currentUrl} onReturn={() => setDemo(false)} onUpdateText={text => setDraft(previous => ({ ...previous, text }))}/>
-  return <div className="new-review"><header className="review-intro"><h1>Bring your next draft.</h1><p>Add your content and context. Review it before it goes public.</p></header><div className="review-layout"><section className="panel review-form"><h2>What would you like to review?</h2><FormatTabs value={draft.format} onChange={value => { update('format', value); setFileError('') }}/><div className="field"><label htmlFor="draft-title">Draft title <span aria-hidden="true">*</span></label><input id="draft-title" value={draft.title} onChange={event => update('title', event.target.value)} required /></div>{draft.format === 'Text' ? <div className="field"><label htmlFor="draft-text">Content <span aria-hidden="true">*</span></label><textarea id="draft-text" value={draft.text} onChange={event => update('text', event.target.value)} maxLength={10000} rows={5} required aria-describedby="character-count"/><p className="character-count" id="character-count">{draft.text.length.toLocaleString()} / 10,000 characters</p></div> : <FilePicker format={draft.format} file={currentFile} onFile={file => setFile(draft.format as 'Image' | 'PDF', file)} error={fileError}/>}<div className="field-row"><div className="field"><label htmlFor="audience">Audience <span aria-hidden="true">*</span></label><input id="audience" value={draft.audience} onChange={event => update('audience', event.target.value)} placeholder="e.g. Small business owners" required/></div><div className="field"><label htmlFor="channel">Purpose / channel <span aria-hidden="true">*</span></label><select id="channel" value={draft.channel} onChange={event => update('channel', event.target.value)} required><option value="">Select a channel</option>{demoChannels.map(channel => <option key={channel}>{channel}</option>)}</select></div></div><div className="field"><label htmlFor="context">Additional context <span className="optional">(optional)</span></label><textarea id="context" rows={2} value={draft.context} onChange={event => update('context', event.target.value)} placeholder="Anything the reviewer should know?"/></div></section><div className="review-side"><DraftPreview draft={draft} file={currentFile} url={currentUrl}/><GuidanceCard value={draft.guidance} onChange={value => update('guidance', value)}/></div></div>{errors.length > 0 && <div className="validation" role="alert"><strong>Please complete the draft:</strong><ul>{errors.map(error => <li key={error}>{error}</li>)}</ul></div>}<div className="review-footer"><p>No content is sent to AI or external services.</p><div><button type="button" className="save-button" onClick={saveDraft}>Save draft</button><button type="button" className="primary-button" onClick={preview}>Preview demo review <span aria-hidden="true">→</span></button></div></div><p className="save-feedback" role="status">{feedback}</p></div>
+  if (demo) return <ReviewWorkspace submitted={draft} file={currentFile} url={currentUrl} savedReview={record?.review} onReturn={() => setDemo(false)} onUpdateText={text => setDraft(previous => ({ ...previous, text }))} onPersist={review => { onSave({ ...draft, text: draft.format === 'Text' ? review.text : draft.text }, 'Unreviewed', currentFile, review) }}/>
+  return <div className="new-review"><p className="local-storage-note">Local demo storage is not secure confidential storage. Files are held in memory only.</p>{record && draft.format !== 'Text' && !currentFile && <p className="local-storage-note" role="status">Please re-upload the {draft.format} file; files are not saved in local storage.</p>}<header className="review-intro"><h1>Bring your next draft.</h1><p>Add your content and context. Review it before it goes public.</p></header><div className="review-layout"><section className="panel review-form"><h2>What would you like to review?</h2><FormatTabs value={draft.format} onChange={value => { update('format', value); setFileError('') }}/><div className="field"><label htmlFor="draft-title">Draft title <span aria-hidden="true">*</span></label><input id="draft-title" value={draft.title} onChange={event => update('title', event.target.value)} required /></div>{draft.format === 'Text' ? <div className="field"><label htmlFor="draft-text">Content <span aria-hidden="true">*</span></label><textarea id="draft-text" value={draft.text} onChange={event => update('text', event.target.value)} maxLength={10000} rows={5} required aria-describedby="character-count"/><p className="character-count" id="character-count">{draft.text.length.toLocaleString()} / 10,000 characters</p></div> : <FilePicker format={draft.format} file={currentFile} onFile={file => setFile(draft.format as 'Image' | 'PDF', file)} error={fileError}/>}<div className="field-row"><div className="field"><label htmlFor="audience">Audience <span aria-hidden="true">*</span></label><input id="audience" value={draft.audience} onChange={event => update('audience', event.target.value)} placeholder="e.g. Small business owners" required/></div><div className="field"><label htmlFor="channel">Purpose / channel <span aria-hidden="true">*</span></label><select id="channel" value={draft.channel} onChange={event => update('channel', event.target.value)} required><option value="">Select a channel</option>{demoChannels.map(channel => <option key={channel}>{channel}</option>)}</select></div></div><div className="field"><label htmlFor="context">Additional context <span className="optional">(optional)</span></label><textarea id="context" rows={2} value={draft.context} onChange={event => update('context', event.target.value)} placeholder="Anything the reviewer should know?"/></div></section><div className="review-side"><DraftPreview draft={draft} file={currentFile} url={currentUrl}/><GuidanceCard value={draft.guidance} onChange={value => update('guidance', value)}/></div></div>{errors.length > 0 && <div className="validation" role="alert"><strong>Please complete the draft:</strong><ul>{errors.map(error => <li key={error}>{error}</li>)}</ul></div>}<div className="review-footer"><p>No content is sent to AI or external services.</p><div><button type="button" className="save-button" onClick={saveDraft}>Save draft</button><button type="button" className="primary-button" onClick={preview}>Preview demo review <span aria-hidden="true">→</span></button></div></div><p className="save-feedback" role="status">{feedback}</p></div>
 }
