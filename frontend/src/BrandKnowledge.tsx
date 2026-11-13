@@ -1,17 +1,239 @@
 import { useEffect, useState } from 'react'
-import { guidanceCategories, sampleGuidance, readGuidanceDocuments } from './knowledgeData'
-import type { GuidanceDocument } from './knowledgeData'
+import { apiBase } from './serverApi'
+import { guidanceCategories } from './knowledgeData'
 import './KnowledgeInsights.css'
-const storageKey = 'inkloom-knowledge-documents-v1'
-const sessionFiles = new Map<string, File>()
+
+type ServerBrandDoc = {
+  id: string
+  title: string
+  category: string
+  version: string
+  is_active: boolean
+  source_filename?: string | null
+  created_at?: string
+  chunks_count?: number
+}
 
 export default function BrandKnowledge() {
- const [initial] = useState(readGuidanceDocuments); const [docs,setDocs] = useState(initial.docs); const [error,setError] = useState(initial.error); const [feedback,setFeedback] = useState(''); const [search,setSearch] = useState(''); const [category,setCategory] = useState('All'); const [selected,setSelected] = useState<string | null>(null); const [title,setTitle] = useState(''); const [group,setGroup] = useState<string>(guidanceCategories[0]); const [description,setDescription] = useState(''); const [file,setFile] = useState<File | null>(null); const [preview,setPreview] = useState(''); const [deleting,setDeleting] = useState(false)
- const sample = sampleGuidance.find(d => d.id === selected); const user = docs.find(d => d.id === selected); const userFile = user ? sessionFiles.get(user.id) : undefined
- useEffect(() => { if (!userFile) { setPreview(''); return } const url = URL.createObjectURL(userFile); setPreview(url); return () => URL.revokeObjectURL(url) }, [userFile])
- function matches(item: {title:string; category:string}) { return item.title.toLowerCase().includes(search.toLowerCase().trim()) && (category === 'All' || item.category === category) }
- function save() { if (!title.trim() || !file) { setError('Enter a title and choose a file.'); return } if (initial.error) { setError(initial.error); return } const item: GuidanceDocument = { id: crypto.randomUUID(), title: title.trim(), category: group, description: description.trim(), fileName: file.name, createdAt: new Date().toISOString() }; const next = [item,...docs]; try { localStorage.setItem(storageKey,JSON.stringify(next)); sessionFiles.set(item.id,file); setDocs(next); setSelected(item.id); setTitle(''); setDescription(''); setFile(null); setError(''); setFeedback('Metadata saved locally. File is available only during this session and is not processed.') } catch { setError('Could not save metadata: local storage is unavailable or full.'); setFeedback('') } }
- function remove() { if (!user) return; const next = docs.filter(item => item.id !== user.id); try { localStorage.setItem(storageKey,JSON.stringify(next)); sessionFiles.delete(user.id); setDocs(next); setSelected(null); setDeleting(false); setFeedback('Local document metadata removed.'); setError('') } catch { setError('Could not remove metadata: local storage is unavailable.'); setFeedback('') } }
- function reattach(next: File | undefined) { if (!user || !next) return; sessionFiles.set(user.id,next); setDocs([...docs]); setFeedback('File available for this session only. It has not been processed.') }
- return <div className="knowledge-page"><header className="ki-heading"><h1>Brand knowledge.</h1><p>Keep reference material close to your work.</p></header><p className="ki-disclosure">Local demo only. Uploads are not sent to a server, processed, indexed, or approved. Metadata is stored in this browser and is not secure confidential storage; files are session-only.</p>{error && <p className="validation" role="alert">{error}</p>}{feedback && <p className="ki-feedback" role="status">{feedback}</p>}<div className="ki-grid"><section className="panel ki-panel"><h2>Documents</h2><div className="ki-filters"><label>Search documents<input type="search" value={search} onChange={e => setSearch(e.target.value)}/></label><label>Category<select value={category} onChange={e => setCategory(e.target.value)}><option>All</option>{guidanceCategories.map(x => <option key={x}>{x}</option>)}</select></label></div><h3>Sample guidance</h3>{sampleGuidance.filter(matches).length ? sampleGuidance.filter(matches).map(item => <button className="ki-doc" key={item.id} onClick={() => { setSelected(item.id); setDeleting(false) }}><strong>{item.title}</strong><span>{item.category} · Sample</span></button>) : <p>No sample guidance matches.</p>}<h3>Your local uploads</h3>{docs.filter(matches).length ? docs.filter(matches).map(item => <button className="ki-doc" key={item.id} onClick={() => { setSelected(item.id); setDeleting(false) }}><strong>{item.title}</strong><span>{item.category} · Not processed</span></button>) : <p>{docs.length ? 'No uploads match.' : 'No local uploads yet.'}</p>}</section><div className="ki-side"><section className="panel ki-panel"><h2>Document details</h2>{sample ? <><span className="format-badge">SAMPLE GUIDANCE</span><h3>{sample.title}</h3><p>{sample.description}</p><p>Illustrative content only. No approval is implied.</p></> : user ? <><span className="format-badge">NOT PROCESSED</span><h3>{user.title}</h3><p>{user.category} · {user.fileName}</p><p>{user.description || 'No description provided.'}</p>{userFile ? <><p>File available in this session: {userFile.name}</p>{preview && <a href={preview} target="_blank" rel="noreferrer">Open local file</a>}</> : <><p>Please re-upload this file to access it; only its metadata was saved.</p><label className="ki-field">Re-upload file<input type="file" onChange={e => reattach(e.target.files?.[0])}/></label></>}{deleting ? <div><p>Delete this local document metadata?</p><button onClick={remove}>Confirm delete</button> <button onClick={() => setDeleting(false)}>Cancel</button></div> : <button onClick={() => setDeleting(true)}>Delete local metadata</button>}</> : <p>Select a document to view its details.</p>}</section><section className="panel ki-panel"><h2>Add local document</h2><label className="ki-field">Title<input value={title} onChange={e => setTitle(e.target.value)}/></label><label className="ki-field">Category<select value={group} onChange={e => setGroup(e.target.value)}>{guidanceCategories.map(x => <option key={x}>{x}</option>)}</select></label><label className="ki-field">Description (optional)<textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}/></label><label className="ki-field">Choose file<input key={selected ?? 'new'} type="file" onChange={e => setFile(e.target.files?.[0] || null)}/></label><button className="primary-button" onClick={save}>Save local metadata</button><p>Not processed · File not saved after refresh.</p></section></div></div></div>
+  const [docs, setDocs] = useState<ServerBrandDoc[]>([])
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState('')
+  const [feedback, setFeedback] = useState('')
+  const [search, setSearch] = useState('')
+  const [category, setCategory] = useState('All')
+  const [selected, setSelected] = useState<string | null>(null)
+  const [title, setTitle] = useState('')
+  const [group, setGroup] = useState<string>(guidanceCategories[0])
+  const [version, setVersion] = useState('1.0')
+  const [file, setFile] = useState<File | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  async function fetchDocs() {
+    setLoading(true)
+    try {
+      const res = await fetch(`${apiBase}/brand-docs`)
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const data = await res.json()
+      const list: ServerBrandDoc[] = Array.isArray(data.documents) ? data.documents : []
+      setDocs(list)
+      setError('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load brand documents from server.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void fetchDocs()
+  }, [])
+
+  function matches(item: ServerBrandDoc) {
+    const q = search.toLowerCase().trim()
+    const matchText = !q || item.title.toLowerCase().includes(q) || (item.source_filename || '').toLowerCase().includes(q)
+    const matchCat = category === 'All' || item.category.toLowerCase() === category.toLowerCase()
+    return matchText && matchCat
+  }
+
+  async function save() {
+    if (!title.trim() || !file) {
+      setError('Enter a title and choose a PDF, image, or text file.')
+      return
+    }
+    setUploading(true)
+    setError('')
+    setFeedback('Extracting, chunking, embedding, and storing in Supabase RAG...')
+    try {
+      const form = new FormData()
+      form.append('title', title.trim())
+      form.append('category', group.toLowerCase())
+      form.append('version', version.trim() || '1.0')
+      form.append('file', file)
+
+      const res = await fetch(`${apiBase}/brand-docs`, {
+        method: 'POST',
+        body: form,
+      })
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Upload failed (${res.status})`)
+      }
+      const created: ServerBrandDoc = await res.json()
+      setFeedback(`Ingested "${created.title}" (${created.chunks_count ?? 0} chunks stored in Supabase RAG).`)
+      setTitle('')
+      setVersion('1.0')
+      setFile(null)
+      await fetchDocs()
+      setSelected(created.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to ingest brand document.')
+      setFeedback('')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function remove(docId: string) {
+    setError('')
+    try {
+      const res = await fetch(`${apiBase}/brand-docs/${docId}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`Delete failed (${res.status})`)
+      setDeleting(false)
+      setSelected(null)
+      setFeedback('Document deactivated (excluded from RAG search).')
+      await fetchDocs()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not deactivate document.')
+    }
+  }
+
+  const activeDoc = docs.find((d) => d.id === selected)
+  const filtered = docs.filter(matches)
+
+  return (
+    <div className="knowledge-page">
+      <header className="ki-heading">
+        <h1>Brand knowledge.</h1>
+        <p>Upload approved brand guidelines, identity rules, and facts to Supabase pgvector RAG.</p>
+      </header>
+      <p className="ki-disclosure">
+        Connected to {apiBase}. Uploaded files are extracted, chunked, embedded with Gemini, and stored in Supabase.
+      </p>
+      {error && (
+        <p className="validation" role="alert">
+          {error}
+        </p>
+      )}
+      {feedback && (
+        <p className="ki-feedback" role="status">
+          {feedback}
+        </p>
+      )}
+      <div className="ki-grid">
+        <section className="panel ki-panel">
+          <h2>Active brand documents ({docs.length})</h2>
+          <div className="ki-filters">
+            <label>
+              Search documents
+              <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} />
+            </label>
+            <label>
+              Category
+              <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                <option>All</option>
+                {guidanceCategories.map((x) => (
+                  <option key={x}>{x}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {loading ? (
+            <p>Loading brand documents from Supabase...</p>
+          ) : filtered.length ? (
+            filtered.map((item) => (
+              <button
+                className="ki-doc"
+                key={item.id}
+                onClick={() => {
+                  setSelected(item.id)
+                  setDeleting(false)
+                }}
+              >
+                <strong>{item.title}</strong>
+                <span>
+                  {item.category} · v{item.version} · {item.source_filename || 'uploaded'}
+                </span>
+              </button>
+            ))
+          ) : (
+            <p>{docs.length ? 'No documents match your filter.' : 'No brand documents uploaded yet. Add one on the right!'}</p>
+          )}
+        </section>
+
+        <div className="ki-side">
+          <section className="panel ki-panel">
+            <h2>Document details</h2>
+            {activeDoc ? (
+              <>
+                <span className="format-badge">INDEXED IN SUPABASE RAG</span>
+                <h3>{activeDoc.title}</h3>
+                <p>
+                  Category: {activeDoc.category} · Version: v{activeDoc.version}
+                </p>
+                <p>Source file: {activeDoc.source_filename || 'N/A'}</p>
+                {deleting ? (
+                  <div>
+                    <p>Deactivate this brand document from RAG search?</p>
+                    <button onClick={() => void remove(activeDoc.id)}>Confirm deactivate</button>{' '}
+                    <button onClick={() => setDeleting(false)}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setDeleting(true)}>Deactivate document</button>
+                )}
+              </>
+            ) : (
+              <p>Select a document to view its details.</p>
+            )}
+          </section>
+
+          <section className="panel ki-panel">
+            <h2>Upload brand document</h2>
+            <label className="ki-field">
+              Title
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Nike Brand Guidelines"
+              />
+            </label>
+            <label className="ki-field">
+              Category
+              <select value={group} onChange={(e) => setGroup(e.target.value)}>
+                {guidanceCategories.map((x) => (
+                  <option key={x}>{x}</option>
+                ))}
+              </select>
+            </label>
+            <label className="ki-field">
+              Version
+              <input value={version} onChange={(e) => setVersion(e.target.value)} placeholder="1.0" />
+            </label>
+            <label className="ki-field">
+              Choose file (PDF, image, or txt)
+              <input
+                key={selected ?? 'new'}
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.webp,.txt"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+              />
+            </label>
+            <button className="primary-button" disabled={uploading} onClick={() => void save()}>
+              {uploading ? 'Ingesting into RAG...' : 'Upload & index in Supabase'}
+            </button>
+          </section>
+        </div>
+      </div>
+    </div>
+  )
 }
