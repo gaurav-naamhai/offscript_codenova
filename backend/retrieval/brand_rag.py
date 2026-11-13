@@ -72,7 +72,10 @@ def embed_texts(texts: List[str], batch_size: int = 20) -> List[List[float]]:
                 res = client.models.embed_content(
                     model=EMBEDDING_MODEL,
                     contents=batch,
-                    config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIM),
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=EMBEDDING_DIM,
+                        http_options={"api_version": "v1beta"},
+                    ),
                 )
                 for emb in res.embeddings:
                     all_embeddings.append(list(emb.values))

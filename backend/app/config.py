@@ -36,7 +36,7 @@ class Settings:
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
     )
     gemini_model: str = field(
-        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
     )
     mock_ai: bool = field(
         default_factory=lambda: os.getenv("MOCK_AI", "false").lower()
@@ -64,7 +64,7 @@ class Settings:
 
     def __post_init__(self):
         if not self.gemini_model:
-            self.gemini_model = "gemini-2.5-flash"
+            self.gemini_model = "gemini-3.5-flash-lite"
 
     @property
     def cors_origins(self) -> List[str]:

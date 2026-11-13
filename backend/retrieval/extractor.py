@@ -27,6 +27,9 @@ def _ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> str:
                     "Preserve headings and paragraph breaks. Return ONLY the extracted text, with no extra commentary."
                 ),
             ],
+            config=types.GenerateContentConfig(
+                http_options={"api_version": "v1beta"},
+            ),
         )
         return (response.text or "").strip()
     except Exception as exc:
