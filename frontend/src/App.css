@@ -55,3 +55,15 @@
   .hero-art { align-self: center; width: 100%; object-position: center; opacity: 1; }
 }
 .knowledge-link{display:inline-flex;align-items:center;gap:4px;background:transparent;color:inherit;border:0;border-bottom:1px solid currentColor;padding:0 0 3px;cursor:pointer}.knowledge .info-content small{display:block;margin:-6px 0 8px;color:#6d5b56}.avatar .icon{width:24px;height:24px}
+.brand-mark { display: block; width: 58px; height: auto; flex: none; transform: none; }
+
+@media (min-width: 761px) {
+  .app { height: 100dvh; min-height: 0; overflow: hidden; }
+  .sidebar { height: 100dvh; min-height: 0; flex-shrink: 0; }
+  .sidebar .brand, .sidebar .workspace, .sidebar-bottom { flex-shrink: 0; }
+  .sidebar nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 0 -13px; padding: 22px 13px 8px; }
+  .sidebar-bottom { margin-top: 0; }
+  .main { height: 100dvh; overflow-y: auto; }
+  .dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+  .desk > p { margin: 6px 0 0; }
+}

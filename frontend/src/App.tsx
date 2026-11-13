@@ -3,7 +3,6 @@ import type { ReactNode } from 'react'
 import ReviewLibrary from './ReviewLibrary'
 import BrandKnowledge from './BrandKnowledge'
 import Insights from './Insights'
-import { readGuidanceDocuments } from './knowledgeData'
 import NewReview from './NewReview'
 import ReviewWorkspace from './ReviewWorkspace'
 import { serverApi } from './serverApi'
@@ -127,9 +126,7 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark" aria-hidden="true">
-          ∞
-        </span>
+        <img className="brand-mark" src={`${import.meta.env.BASE_URL}assets/inkloom-mark-silver.png`} alt="" />
         <span>Inkloom AI</span>
       </div>
       <div className="workspace">
@@ -321,41 +318,6 @@ function RecentReviews({
   )
 }
 
-function InfoCards({ onKnowledge }: { onKnowledge: () => void }) {
-  const { docs, error } = readGuidanceDocuments()
-  const latest = docs[0]
-  return (
-    <div className="info-cards">
-      <section className="panel attention">
-        <h2>Needs your attention</h2>
-        <div className="info-content">
-          <Icon name="alert" />
-          <div>
-            <p>Demo guidance only</p>
-            <span className="card-link">
-              Review findings <Icon name="arrow" />
-              <small>Coming soon</small>
-            </span>
-          </div>
-        </div>
-      </section>
-      <section className="panel knowledge">
-        <h2>Brand knowledge</h2>
-        <div className="info-content">
-          <Icon name="book" />
-          <div>
-            <p>{error ? 'Guidance metadata unavailable' : latest ? latest.title : 'No brand guidance added'}</p>
-            {latest && <small>{latest.category} · Loaded</small>}
-            <button className="card-link knowledge-link" onClick={onKnowledge}>
-              Open Brand Knowledge <Icon name="arrow" />
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
-  )
-}
-
 function App() {
   const [submissions, setSubmissions] = useState<SubmissionSummary[]>([])
   const [loading, setLoading] = useState(false)
@@ -452,7 +414,6 @@ function App() {
                 onLibrary={() => navigate('library')}
                 onOpen={open}
               />
-              <InfoCards onKnowledge={() => navigate('knowledge')} />
             </div>
           </>
         )}
