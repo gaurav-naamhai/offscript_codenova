@@ -3,12 +3,13 @@ import type { ChangeEvent, DragEvent } from 'react'
 import { demoChannels, demoGuidance } from './demoData'
 import './NewReview.css'
 import ReviewWorkspace from './ReviewWorkspace'
+import { readGuidanceDocuments } from './knowledgeData'
 import type { ReviewRecord } from './reviewStore'
 
 type Format = 'Text' | 'Image' | 'PDF'
 export type Draft = { format: Format; title: string; text: string; audience: string; channel: string; context: string; guidance: string }
 type Files = Record<'Image' | 'PDF', File | null>
-const emptyDraft: Draft = { format: 'Text', title: '', text: '', audience: '', channel: '', context: '', guidance: demoGuidance[0] }
+const emptyDraft: Draft = { format: 'Text', title: '', text: '', audience: '', channel: '', context: '', guidance: 'No brand guidance' }
 function useFileUrl(file: File | null) {
   const [url, setUrl] = useState('')
   useEffect(() => {
@@ -32,7 +33,9 @@ function DraftPreview({ draft, file, url }: { draft: Draft; file: File | null; u
   return <section className="panel review-preview"><div className="preview-heading"><h2>Draft preview</h2><span className="format-badge">{draft.format}</span></div><div className="preview-paper"><h3>{draft.title.trim() || 'Untitled draft'}</h3>{draft.format === 'Text' ? <p className="preview-text">{draft.text || 'Your text will appear here as you type.'}</p> : !file || !url ? <p className="preview-empty">Choose a {draft.format} file to preview it here.</p> : draft.format === 'Image' ? <><img src={url} alt={`Preview of ${file.name}`} /><p className="preview-filename">{file.name}</p></> : <><object className="pdf-preview" data={url} type="application/pdf" aria-label={`PDF preview: ${file.name}`}><p>PDF preview is unavailable. <a href={url} target="_blank" rel="noreferrer">Open PDF file</a>.</p></object><p className="preview-filename">{file.name} · <a href={url} target="_blank" rel="noreferrer">Open PDF file</a></p></>}</div></section>
 }
 function GuidanceCard({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <section className="panel guidance-card"><h2>Review against</h2><label htmlFor="guidance">Demo brand guidance</label><select id="guidance" value={value} onChange={event => onChange(event.target.value)}>{demoGuidance.map(option => <option key={option}>{option}</option>)}</select><p>Demo selection only. No brand guidance is applied or analyzed.</p></section>
+  const { docs, error } = readGuidanceDocuments()
+  const known = value === 'No brand guidance' || demoGuidance.includes(value as typeof demoGuidance[number]) || docs.some(doc => `document:${doc.id}` === value)
+  return <section className="panel guidance-card"><h2>Review against</h2><label htmlFor="guidance">Guidance reference (local demo)</label><select id="guidance" value={value} onChange={event => onChange(event.target.value)}><option value="No brand guidance">No brand guidance</option><optgroup label="Sample guidance (demo only)">{demoGuidance.filter(option => option !== 'No brand guidance').map(option => <option value={option} key={option}>Sample · {option}</option>)}</optgroup>{docs.length > 0 && <optgroup label="Your documents — not processed">{docs.map(doc => <option value={`document:${doc.id}`} key={doc.id}>{doc.title} · Not processed</option>)}</optgroup>}{!known && <option value={value}>Previously saved selection unavailable</option>}</select>{error && <p role="status">{error}</p>}<p>Selections are references only. User documents are not processed and cannot power checks; sample guidance is illustrative. No guidance is applied or analyzed.</p></section>
 }
 export default function NewReview({ record, sessionFile, onSave }: { record?: ReviewRecord; sessionFile: File | null; onSave: (draft: Draft, status: ReviewRecord['status'], file: File | null, review?: ReviewRecord['review']) => { id: string; error: string } }) {
   const [draft, setDraft] = useState<Draft>(record?.draft ?? emptyDraft)

@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { guidanceCategories, sampleGuidance } from './knowledgeData'
+import { guidanceCategories, sampleGuidance, readGuidanceDocuments } from './knowledgeData'
 import type { GuidanceDocument } from './knowledgeData'
 import './KnowledgeInsights.css'
 const storageKey = 'inkloom-knowledge-documents-v1'
 const sessionFiles = new Map<string, File>()
-function read(): { docs: GuidanceDocument[]; error: string } { try { const value: unknown = JSON.parse(localStorage.getItem(storageKey) || '[]'); if (!Array.isArray(value)) throw Error('invalid'); return { docs: value as GuidanceDocument[], error: '' } } catch { return { docs: [], error: 'Local document metadata is unavailable. Existing data was left untouched.' } } }
+
 export default function BrandKnowledge() {
- const [initial] = useState(read); const [docs,setDocs] = useState(initial.docs); const [error,setError] = useState(initial.error); const [feedback,setFeedback] = useState(''); const [search,setSearch] = useState(''); const [category,setCategory] = useState('All'); const [selected,setSelected] = useState<string | null>(null); const [title,setTitle] = useState(''); const [group,setGroup] = useState<string>(guidanceCategories[0]); const [description,setDescription] = useState(''); const [file,setFile] = useState<File | null>(null); const [preview,setPreview] = useState(''); const [deleting,setDeleting] = useState(false)
+ const [initial] = useState(readGuidanceDocuments); const [docs,setDocs] = useState(initial.docs); const [error,setError] = useState(initial.error); const [feedback,setFeedback] = useState(''); const [search,setSearch] = useState(''); const [category,setCategory] = useState('All'); const [selected,setSelected] = useState<string | null>(null); const [title,setTitle] = useState(''); const [group,setGroup] = useState<string>(guidanceCategories[0]); const [description,setDescription] = useState(''); const [file,setFile] = useState<File | null>(null); const [preview,setPreview] = useState(''); const [deleting,setDeleting] = useState(false)
  const sample = sampleGuidance.find(d => d.id === selected); const user = docs.find(d => d.id === selected); const userFile = user ? sessionFiles.get(user.id) : undefined
  useEffect(() => { if (!userFile) { setPreview(''); return } const url = URL.createObjectURL(userFile); setPreview(url); return () => URL.revokeObjectURL(url) }, [userFile])
  function matches(item: {title:string; category:string}) { return item.title.toLowerCase().includes(search.toLowerCase().trim()) && (category === 'All' || item.category === category) }

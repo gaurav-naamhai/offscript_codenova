@@ -23,7 +23,8 @@ function submission(value: unknown): ServerSubmission {
 async function request(path: string, init?: RequestInit): Promise<Response> {
   const controller = new AbortController(); const timer = window.setTimeout(() => controller.abort(), 60000)
   try {
-    const response = await fetch(`${apiBase}${path}`, { ...init, signal: controller.signal })
+    const headers = new Headers(init?.headers); if (init?.method === 'POST') headers.set('X-Actor', 'Guest')
+    const response = await fetch(`${apiBase}${path}`, { ...init, headers, signal: controller.signal })
     if (!response.ok) { let detail = ''; try { const body: unknown = await response.json(); if (body && typeof body === 'object') { if ('detail' in body) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail); else if ('error' in body && body.error && typeof body.error === 'object' && 'message' in body.error && typeof body.error.message === 'string') detail = body.error.message } } catch { /* no JSON detail */ } throw new Error(`Server returned ${response.status}${detail ? `: ${detail}` : ''}`) }
     return response
   } catch (error) {
