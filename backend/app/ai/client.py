@@ -80,10 +80,7 @@ class GeminiClient:
         else:
             self.mock_mode = bool(cfg.mock_ai)
 
-        raw_model = model or cfg.gemini_model or "gemini-2.5-flash"
-        if raw_model in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "3.5-flash-lite"):
-            raw_model = "gemini-2.5-flash"
-        self.model = raw_model
+        self.model = model or cfg.gemini_model or "gemini-3.5-flash-lite"
 
         raw_key = api_key or cfg.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
         self._api_key = raw_key.strip() if raw_key else ""

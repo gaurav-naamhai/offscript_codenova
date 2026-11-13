@@ -46,7 +46,7 @@ class TestGeminiClientCore(unittest.TestCase):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=True):
             client = GeminiClient(mock_mode=True)
             self.assertTrue(client.mock_mode)
-            self.assertEqual(client.model, "gemini-2.5-flash")
+            self.assertEqual(client.model, "gemini-3.5-flash-lite")
 
     def test_masked_api_key_protects_secrets(self):
         """Client must never reveal full raw API key in logs or string representations."""
@@ -188,7 +188,7 @@ class TestSettingsAndDotenv(unittest.TestCase):
     def test_settings_default_model_fallback(self):
         with patch.dict(os.environ, {"GEMINI_MODEL": ""}):
             s = Settings(gemini_model="")
-            self.assertEqual(s.gemini_model, "gemini-2.5-flash")
+            self.assertEqual(s.gemini_model, "gemini-3.5-flash-lite")
 
 
 if __name__ == "__main__":

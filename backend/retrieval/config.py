@@ -20,12 +20,7 @@ EXA_API_KEY: str = os.getenv("EXA_API_KEY", "").strip()
 
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001").strip()
 EMBEDDING_DIM: int = 768
-_raw_gemini_model = os.getenv("GEMINI_MODEL", "").strip()
-GEMINI_MODEL: str = (
-    "gemini-2.5-flash"
-    if not _raw_gemini_model or _raw_gemini_model in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "3.5-flash-lite")
-    else _raw_gemini_model
-)
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
 
 TINYSEARCH_URL: str = "https://api.search.tinyfish.ai"
 TINYFETCH_URL: str = "https://api.fetch.tinyfish.ai"
