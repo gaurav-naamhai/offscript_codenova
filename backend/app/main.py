@@ -682,6 +682,72 @@ def create_app(
             aaa_normal=ratio >= 7.0,
         )
 
+    @app.get("/brand-docs")
+    async def list_brand_documents(include_inactive: bool = False):
+        """List approved brand knowledge documents stored in Supabase RAG."""
+        try:
+            from retrieval.config import SUPABASE_KEY, SUPABASE_URL
+            if not (SUPABASE_URL and SUPABASE_KEY):
+                return {"documents": []}
+            from retrieval.brand_rag import list_brand_docs
+
+            docs = await run_in_threadpool(list_brand_docs, include_inactive)
+            return {"documents": docs}
+        except Exception as exc:
+            logger.warning("Failed to list brand documents: %s", exc)
+            raise HTTPException(502, f"Could not load brand documents: {exc}")
+
+    @app.post("/brand-docs", status_code=status.HTTP_201_CREATED)
+    async def upload_brand_document(
+        title: str = Form(...),
+        category: str = Form("guideline"),
+        version: str = Form("1.0"),
+        file: UploadFile = File(...),
+    ):
+        """Extract, chunk, embed, and ingest a brand document into Supabase pgvector RAG."""
+        clean_title = title.strip()
+        if not clean_title:
+            raise HTTPException(422, "Document title is required.")
+        raw_bytes = await file.read()
+        if not raw_bytes:
+            raise HTTPException(422, "Uploaded file is empty.")
+        if len(raw_bytes) > MAX_PDF_SIZE:
+            raise HTTPException(413, "Brand document exceeds 10MB limit.")
+
+        try:
+            from retrieval.brand_rag import ingest_brand_doc
+
+            record = await run_in_threadpool(
+                ingest_brand_doc,
+                file_bytes=raw_bytes,
+                filename=file.filename or "brand_document.pdf",
+                title=clean_title,
+                category=category.strip() or "guideline",
+                version=version.strip() or "1.0",
+            )
+            return record.model_dump()
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        except Exception as exc:
+            logger.error("Brand document ingestion failed: %s", exc, exc_info=True)
+            raise HTTPException(502, f"Brand document ingestion failed: {exc}")
+
+    @app.delete("/brand-docs/{doc_id}")
+    async def remove_brand_document(doc_id: str):
+        """Deactivate (soft-delete) a brand document so RAG ignores outdated rules."""
+        try:
+            from retrieval.brand_rag import deactivate_brand_doc
+
+            updated = await run_in_threadpool(deactivate_brand_doc, document_id=doc_id)
+            if not updated:
+                raise HTTPException(404, "Brand document not found.")
+            return {"status": "deactivated", "id": doc_id}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Failed to deactivate brand document: %s", exc)
+            raise HTTPException(502, f"Could not deactivate brand document: {exc}")
+
     @app.post("/demo/seed")
     async def demo_seed():
         """Seed 3 sample submissions for live judging demonstrations."""
