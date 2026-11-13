@@ -1,0 +1,11 @@
+import { useCallback, useEffect, useState } from 'react'
+import { sampleInsights } from './demoData'
+import { serverApi } from './serverApi'
+import type { RecurringInsights } from './serverApi'
+import './KnowledgeInsights.css'
+export default function Insights({ mode }: { mode: 'local' | 'server' }) {
+ const [data,setData] = useState<RecurringInsights | null>(mode === 'local' ? sampleInsights : null); const [error,setError] = useState(''); const [loading,setLoading] = useState(false)
+ const load = useCallback(async () => { setLoading(true); setError(''); try { setData(await serverApi.insights()) } catch(e) { setData(null); setError(e instanceof Error ? e.message : 'Insights unavailable.') } finally { setLoading(false) } }, [])
+ useEffect(() => { if (mode === 'server') void load(); else setData(sampleInsights) }, [mode,load])
+ return <div className="insights-page"><header className="ki-heading"><h1>Insights.</h1><p>{mode === 'local' ? 'Sample insights · illustrative data only.' : 'Server recurring findings · includes placeholder review findings.'}</p></header><p className="ki-disclosure">Counts describe findings, not approved content or proof that checks passed.</p>{mode === 'server' && <button className="ki-retry" onClick={() => void load()} disabled={loading}>Refresh insights</button>}{loading && <p role="status">Loading insights; the server may be waking up…</p>}{error && <p className="validation" role="alert">{error}</p>}{!loading && data && <><div className="panel ki-total"><span>Total flags</span><strong>{data.total_flags}</strong></div><div className="insight-grid"><section className="panel ki-panel"><h2>Recurring guidelines</h2>{data.top_guidelines.length ? <ul className="insight-list">{data.top_guidelines.map((item,index) => <li key={index}><span>{typeof item.guideline === 'string' ? item.guideline : 'Unspecified guideline'}</span><strong>{typeof item.count === 'number' ? item.count : 'Unavailable'}</strong></li>)}</ul> : <p>No guideline counts available.</p>}</section><section className="panel ki-panel"><h2>Assessment states</h2>{Object.keys(data.state_counts).length ? <ul className="insight-list">{Object.entries(data.state_counts).map(([state,count]) => <li key={state}><span>{state.replaceAll('_',' ')}</span><strong>{count}</strong></li>)}</ul> : <p>No assessment counts available.</p>}</section></div></>}</div>
+}
