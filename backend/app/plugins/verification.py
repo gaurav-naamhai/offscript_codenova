@@ -6,7 +6,7 @@ with automatic fallback to offline fixture rules when credentials are unavailabl
 """
 
 import re
-from typing import List
+from typing import List, Optional
 
 from app.models import ContentPayload, ExternalSource, FlagDraft
 
