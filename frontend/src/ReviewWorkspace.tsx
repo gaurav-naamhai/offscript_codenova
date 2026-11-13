@@ -3,6 +3,16 @@ import { serverApi } from './serverApi'
 import type { AuditEvent, RecheckResult, ServerDetail, ServerFlag, VersionInfo } from './serverApi'
 import './ReviewWorkspace.css'
 
+function CorrectionText({ original, correction }: { original: string; correction: string }) {
+  const before = original.match(/\S+\s*|\s+/g) || []
+  const after = correction.match(/\S+\s*|\s+/g) || []
+  let start = 0
+  while (start < before.length && start < after.length && before[start] === after[start]) start++
+  let end = 0
+  while (end < before.length - start && end < after.length - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++
+  return <>{after.slice(0, start).join('')}<strong className="correction-change">{after.slice(start, after.length - end).join('')}</strong>{end > 0 && after.slice(-end).join('')}</>
+}
+
 export default function ReviewWorkspace({
   submissionId,
   onReturn,
@@ -201,50 +211,39 @@ export default function ReviewWorkspace({
   const label = (state: string) => ({ aligned: 'Aligned', supported: 'Supported', potential_issue: 'Potential issue', unclear: 'Unclear', contradicted: 'Contradicted', insufficient_evidence: 'Insufficient evidence' } as Record<string, string>)[state] || state.replaceAll('_', ' ')
   const selectedFlag = flags.find(f => f.id === selectedId)
 
-  const renderFinding = (f: ServerFlag) => (
-              <article className="finding" key={f.id}>
-                <button
-                  className="finding-select"
-                  type="button"
-                  aria-pressed={selectedId === f.id}
-                  onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
-                >
-                  <strong>{f.finding_type === 'brand' ? 'Brand' : 'Claim'}: {label(f.state)}</strong>
-                  <span>{f.status.toUpperCase()}</span>
-                </button>
-
-                <div className="finding-detail">
-                    {f.origin === 'error' && <p className="stale-label">Check incomplete.</p>}
-                    {f.origin === 'fixture' && <p>Placeholder check.</p>}
-                    {(f as ServerFlag & { uncertainty_note?: string }).uncertainty_note && <p><strong>Uncertainty:</strong> {(f as ServerFlag & { uncertainty_note?: string }).uncertainty_note}</p>}
-                    {f.passage && <p><strong>Affected text:</strong> <mark>{f.passage}</mark></p>}
-                    {f.suggested_correction && <p><strong>Suggested correction:</strong> {f.suggested_correction}</p>}
-                    <details><summary>Why this was flagged</summary>
-                    <p><strong>Explanation:</strong> {f.explanation}</p>
-                    <p><strong>Why it matters:</strong> {f.why_it_matters}</p>
-                    {((f as ServerFlag & { guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }).guideline_refs?.length ? (f as ServerFlag & { guideline_refs: NonNullable<ServerFlag['guideline_ref']>[] }).guideline_refs : f.guideline_ref ? [f.guideline_ref] : []).map((ref, index) => <p className="source-excerpt" key={index}><strong>Guideline reference:</strong> {ref.document} ({ref.passage_ref})<br/><em>{ref.excerpt}</em>{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>)}
-                    {f.external_sources && f.external_sources.length > 0 && (
-                      <div className="source-excerpt">
-                        <strong>External evidence:</strong>
-                        {f.external_sources.map((s, sIdx) => (
-                          <div key={sIdx}>
-                            <a href={s.url} target="_blank" rel="noreferrer">{s.url}</a>: "{s.excerpt}"
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    </details>
-                    <div className="workspace-actions">
-                      {f.status === 'open' && <>
-                        {f.suggested_correction && sub.content_type === 'text' && <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>Apply suggestion</button>}
-                        <button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss</button>
-                        {sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}
-                      </>}
-                    </div>
-                    {recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}
-                </div>
-              </article>
-  )
+  const renderFinding = (f: ServerFlag) => {
+    const extra = f as ServerFlag & { uncertainty_note?: string | null; guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }
+    const refs = extra.guideline_refs?.length ? extra.guideline_refs : f.guideline_ref ? [f.guideline_ref] : []
+    const wholeDraft = f.passage.trim().toLowerCase() === '(whole submission)'
+    const incomplete = f.origin === 'error'
+    const canEdit = sub.content_type === 'text' && sub.status === 'draft'
+    return <article className={`finding${incomplete ? ' finding-incomplete' : ''}`} key={f.id}>
+      <div className="finding-detail">
+        <div className="finding-heading"><strong>{incomplete ? 'Review incomplete' : f.state === 'insufficient_evidence' ? 'Needs supporting evidence' : `${f.finding_type === 'brand' ? 'Brand' : 'Claim'}: ${label(f.state)}`}</strong><span className="finding-status">{f.status.replaceAll('_', ' ')}</span></div>
+        {f.origin === 'fixture' && <p className="finding-note">Placeholder check</p>}
+        {extra.uncertainty_note && <p className="finding-note"><strong>Uncertainty:</strong> {extra.uncertainty_note}</p>}
+        {f.needs_human && <p className="finding-note">Human review required.</p>}
+        {!incomplete && <>
+          {wholeDraft ? <p>Applies to the whole draft</p> : f.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={selectedId === f.id} onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}>{f.passage}</button></div> : <p>Exact text location unavailable.</p>}
+          {f.suggested_correction && <div className="finding-copy"><strong>Suggested correction</strong><p><CorrectionText original={wholeDraft ? '' : f.passage} correction={f.suggested_correction}/></p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}
+        </>}
+        <details className="finding-source"><summary>ⓘ Source &amp; explanation</summary>
+          <p>{f.explanation}</p><p>{f.why_it_matters}</p>
+          {refs.length ? refs.map((ref, index) => <p className="source-excerpt" key={index}><strong>{ref.document}</strong> · {ref.passage_ref}<br/>{ref.excerpt}{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>) : <p>No guideline reference returned.</p>}
+          {f.external_sources?.length ? f.external_sources.map((source, index) => <p className="source-excerpt" key={index}><a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>: {source.excerpt}</p>) : <p>No external evidence returned.</p>}
+        </details>
+        {!incomplete && f.status === 'open' && <>
+          <div className="workspace-actions finding-actions">
+            {f.suggested_correction && sub.content_type === 'text' && <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>Accept change</button>}
+            {sub.content_type === 'text' && <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing} title={!canEdit ? 'Manual editing is available for drafts.' : undefined}>Edit manually</button>}
+          </div>
+          {sub.content_type === 'text' && !canEdit && <p className="finding-note">Manual editing is available when the submission is a draft.</p>}
+          <div className="finding-secondary"><button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss</button>{sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}</div>
+        </>}
+        {recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}
+      </div>
+    </article>
+  }
 
   return (
     <div className="review-workspace">
