@@ -225,40 +225,51 @@ export default function ReviewWorkspace({
   const label = (state: string) => ({ aligned: 'Aligned', supported: 'Supported', potential_issue: 'Potential issue', unclear: 'Unclear', contradicted: 'Contradicted', insufficient_evidence: 'Insufficient evidence' } as Record<string, string>)[state] || state.replaceAll('_', ' ')
   const selectedFlag = flags.find(f => f.id === selectedId)
 
-  const renderFinding = (f: ServerFlag) => {
-    const extra = f as ServerFlag & { uncertainty_note?: string | null; guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }
-    const refs = extra.guideline_refs?.length ? extra.guideline_refs : f.guideline_ref ? [f.guideline_ref] : []
-    const wholeDraft = f.passage.trim().toLowerCase() === '(whole submission)'
-    const incomplete = f.origin === 'error'
+  // Location is free-form. A unique occurrence in the submitted text is the only
+  // location we can identify safely without inventing offsets or file coordinates.
+  const groupFindings = (items: ServerFlag[]) => {
+    const groups: ServerFlag[][] = []
+    const byPassage = new Map<string, ServerFlag[]>()
+    for (const f of items) {
+      const version = (f as ServerFlag & { version?: number }).version
+      const text = sub.text || ''
+      const first = f.passage ? text.indexOf(f.passage) : -1
+      const unique = sub.content_type === 'text' && f.origin !== 'error' && f.passage.trim().toLowerCase() !== '(whole submission)' && first >= 0 && text.indexOf(f.passage, first + 1) < 0 && (version == null || version === sub.version)
+      const existing = unique ? byPassage.get(f.passage) : undefined
+      if (existing) existing.push(f)
+      else { const group = [f]; groups.push(group); if (unique) byPassage.set(f.passage, group) }
+    }
+    return groups
+  }
+
+  const renderGroup = (group: ServerFlag[]) => {
+    const first = group[0]
+    const wholeDraft = first.passage.trim().toLowerCase() === '(whole submission)'
+    const incomplete = first.origin === 'error'
     const canEdit = sub.content_type === 'text' && sub.status === 'draft'
-    const showDiff = !!f.suggested_correction && !!f.passage && !wholeDraft && !incomplete && f.state !== 'unclear' && f.state !== 'insufficient_evidence' && !extra.uncertainty_note
-    const diff = showDiff ? compareText(f.passage, f.suggested_correction!) : null
-    return <article className={`finding${incomplete ? ' finding-incomplete' : ''}`} key={f.id}>
-      <div className="finding-detail">
-        <div className="finding-heading"><strong>{incomplete ? 'Review incomplete' : f.state === 'insufficient_evidence' ? 'Needs supporting evidence' : `${f.finding_type === 'brand' ? 'Brand' : 'Claim'}: ${label(f.state)}`}</strong><span className="finding-status">{f.status.replaceAll('_', ' ')}</span></div>
-        {f.origin === 'fixture' && <p className="finding-note">Placeholder check</p>}
-        {extra.uncertainty_note && <p className="finding-note"><strong>Uncertainty:</strong> {extra.uncertainty_note}</p>}
-        {f.needs_human && <p className="finding-note">Human review required.</p>}
-        {!incomplete && <>
-          {wholeDraft ? <p>Applies to the whole draft</p> : f.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={selectedId === f.id} onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}>{diff ? <DiffText tokens={diff.before} changes={diff.removed} kind="removed"/> : f.passage}</button></div> : <p>Exact text location unavailable.</p>}
-          {f.suggested_correction && <div className="finding-copy"><strong>Suggested correction</strong><p>{diff ? <DiffText tokens={diff.after} changes={diff.added} kind="added"/> : f.suggested_correction}</p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}
-        </>}
-        <details className="finding-source"><summary>ⓘ Source &amp; explanation</summary>
-          <p>{f.explanation}</p><p>{f.why_it_matters}</p>
-          {refs.length ? refs.map((ref, index) => <p className="source-excerpt" key={index}><strong>{ref.document}</strong> · {ref.passage_ref}<br/>{ref.excerpt}{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>) : <p>No guideline reference returned.</p>}
-          {f.external_sources?.length ? f.external_sources.map((source, index) => <p className="source-excerpt" key={index}><a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>: {source.excerpt}</p>) : <p>No external evidence returned.</p>}
-        </details>
-        {!incomplete && f.status === 'open' && <>
-          <div className="workspace-actions finding-actions">
-            {f.suggested_correction && sub.content_type === 'text' && <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>Accept change</button>}
-            {sub.content_type === 'text' && <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing} title={!canEdit ? 'Manual editing is available for drafts.' : undefined}>Edit manually</button>}
-          </div>
-          {sub.content_type === 'text' && !canEdit && <p className="finding-note">Manual editing is available when the submission is a draft.</p>}
-          <div className="finding-secondary"><button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss</button>{sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}</div>
-        </>}
-        {recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}
-      </div>
-    </article>
+    const suggestions = [...new Set(group.map(f => f.suggested_correction).filter((v): v is string => !!v))]
+    const conflict = suggestions.length > 1
+    const canHighlight = (f: ServerFlag) => f.state !== 'unclear' && f.state !== 'insufficient_evidence' && !(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note
+    const sharedDiff = suggestions.length === 1 && !!first.passage && !wholeDraft && group.every(canHighlight) ? compareText(first.passage, suggestions[0]) : null
+    const explain = (f: ServerFlag) => {
+      const extra = f as ServerFlag & { uncertainty_note?: string | null; guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }
+      const refs = extra.guideline_refs?.length ? extra.guideline_refs : f.guideline_ref ? [f.guideline_ref] : []
+      return <><p>{f.explanation}</p><p>{f.why_it_matters}</p>{refs.length ? refs.map((ref, i) => <p className="source-excerpt" key={i}><strong>{ref.document}</strong> · {ref.passage_ref}<br/>{ref.excerpt}{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>) : <p>No guideline reference returned.</p>}{f.external_sources?.length ? f.external_sources.map((source, i) => <p className="source-excerpt" key={i}><a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>: {source.excerpt}</p>) : <p>No external evidence returned.</p>}</>
+    }
+    const actions = (f: ServerFlag, index: number) => <div className="preview-finding" key={f.id}><strong>Finding {index + 1} · {f.finding_type === 'brand' ? 'Brand' : 'Claim'} · {label(f.state)} · {f.status}</strong>{explain(f)}{f.origin !== 'error' && f.status === 'open' && <div className="finding-secondary"><button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss finding {index + 1}</button>{sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}</div>}{recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}</div>
+    const accept = (f: ServerFlag, index: number, numbered: boolean) => f.status === 'open' && f.suggested_correction && sub.content_type === 'text' ? <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy} key={f.id}>{numbered ? `Accept for finding ${index + 1} (${f.finding_type === 'brand' ? 'Brand' : 'Claim'})` : 'Accept change'}</button> : null
+    return <article className={`finding${incomplete ? ' finding-incomplete' : ''}`} key={first.id}><div className="finding-detail">
+      {incomplete && <strong>Review incomplete</strong>}
+      {group.some(f => f.origin === 'fixture') && <p className="finding-note">Placeholder check</p>}
+      {group.some(f => f.state === 'insufficient_evidence') && <p className="finding-note">Needs supporting evidence.</p>}
+      {group.map(f => <div key={f.id}>{(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note && <p className="finding-note"><strong>Uncertainty:</strong> {(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note}</p>}{f.needs_human && <p className="finding-note">Human review required.</p>}</div>)}
+      {!incomplete && <>{wholeDraft ? <p>Applies to the whole draft</p> : first.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={group.some(f => f.id === selectedId)} onClick={() => setSelectedId(group.some(f => f.id === selectedId) ? null : first.id)}>{sharedDiff ? <DiffText tokens={sharedDiff.before} changes={sharedDiff.removed} kind="removed"/> : first.passage}</button></div> : <p>Exact text location unavailable.</p>}
+      {conflict ? <><p><strong>Suggestions disagree</strong></p><details className="finding-source"><summary>Review options</summary>{suggestions.map((suggestion, n) => { const related = group.filter(f => f.suggested_correction === suggestion); const diff = !wholeDraft && related.every(canHighlight) ? compareText(first.passage, suggestion) : null; return <div className="preview-option" key={suggestion}><strong>Option {n + 1}</strong><p>{diff ? <DiffText tokens={diff.after} changes={diff.added} kind="added"/> : suggestion}</p>{related.map(f => <div key={f.id}><details><summary>{f.finding_type === 'brand' ? 'Brand' : 'Claim'} source &amp; explanation</summary>{explain(f)}</details><div className="workspace-actions finding-actions">{accept(f, group.indexOf(f), related.length > 1)}</div></div>)}</div>})}</details></> : suggestions.length === 1 && <div className="finding-copy"><strong>Suggested correction</strong><p>{sharedDiff ? <DiffText tokens={sharedDiff.after} changes={sharedDiff.added} kind="added"/> : suggestions[0]}</p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}</>}
+      <details className="finding-source"><summary>Sources &amp; details</summary>{group.map(actions)}</details>
+      {!incomplete && !conflict && <div className="workspace-actions finding-actions">{group.length > 1 && group.some(f => f.status === 'open' && f.suggested_correction) && sub.content_type === 'text' ? <details className="preview-accept"><summary>Accept change</summary><p>Choose one finding to resolve.</p><div className="workspace-actions">{group.map((f,i) => accept(f,i,true))}</div></details> : group.map((f,i) => accept(f,i,false))}{sub.content_type === 'text' && <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing}>Edit manually</button>}</div>}
+      {!incomplete && conflict && sub.content_type === 'text' && <div className="workspace-actions finding-actions"><button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing}>Edit manually</button></div>}
+      {sub.content_type === 'text' && !canEdit && !incomplete && <p className="finding-note">Manual editing is available when the submission is a draft.</p>}
+    </div></article>
   }
 
   return (
@@ -389,8 +400,8 @@ export default function ReviewWorkspace({
           {flags.length === 0 && <p>No findings returned. This does not mean the whole draft passed.</p>}
           {flags.some(f => f.origin === 'error') && <p className="stale-label" role="status">Some checks are incomplete. Review the findings below.</p>}
           {flags.some(f => f.origin === 'fixture') && <p>Some findings come from placeholder checks.</p>}
-          {findings.map(renderFinding)}
-          {otherChecks.length > 0 && <details><summary>Other checks ({otherChecks.length})</summary><p>These results do not establish that the whole draft passed.</p>{otherChecks.map(renderFinding)}</details>}
+          {groupFindings(findings).map(renderGroup)}
+          {otherChecks.length > 0 && <details><summary>Other checks ({otherChecks.length})</summary><p>These results do not establish that the whole draft passed.</p>{groupFindings(otherChecks).map(renderGroup)}</details>}
 
           {/* Comments section */}
           <details className="local-records">
