@@ -126,7 +126,7 @@ def verify_claims(
             )
             # Route through Sera's claim verification using Ken's external search
             claim_output = ai_verify_claims(content, client=client)  # type: ignore[arg-type]
-            flags = [claim_finding_to_flag_draft(f) for f in claim_output.findings]
+            flags = [claim_finding_to_flag_draft(f, full_text=content.text) for f in claim_output.findings]
             if flags:
                 return flags
 

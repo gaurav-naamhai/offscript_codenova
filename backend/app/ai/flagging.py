@@ -71,6 +71,12 @@ def synthesize_flag_drafts(
                     passage_ref=bf.guideline_section or "Rule",
                     excerpt=bf.guideline_excerpt or "",
                     source_reference=None,
+                    chunk_id=bf.chunk_id,
+                    document_id=bf.guideline_document_id,
+                    section=bf.guideline_section,
+                    page_number=bf.page_number,
+                    similarity=bf.similarity,
+                    exact_violated_passage=bf.exact_violated_passage,
                 )
 
             drafts.append(
@@ -89,6 +95,7 @@ def synthesize_flag_drafts(
                     origin="module",
                     status="open",
                     comments=[],
+                    exact_violated_passage=bf.exact_violated_passage,
                 )
             )
 
@@ -203,9 +210,46 @@ def deduplicate_and_synthesize_flag_drafts(
             if not existing.guideline_ref and d.guideline_ref:
                 existing.guideline_ref = d.guideline_ref
 
+            # Merge internal evidence items
+            existing_ie_keys = {
+                (ie.document, ie.chunk_id or ie.section or ie.retrieved_chunk_text[:40])
+                for ie in existing.internal_evidence
+            }
+            for ie in d.internal_evidence:
+                ie_key = (ie.document, ie.chunk_id or ie.section or ie.retrieved_chunk_text[:40])
+                if ie_key not in existing_ie_keys:
+                    existing.internal_evidence.append(ie)
+                    existing_ie_keys.add(ie_key)
+
+            # Merge external evidence items
+            existing_ee_urls = {ee.url for ee in existing.external_evidence}
+            for ee in d.external_evidence:
+                if ee.url not in existing_ee_urls:
+                    existing.external_evidence.append(ee)
+                    existing_ee_urls.add(ee.url)
+
+            # Re-determine evidence mode
+            has_int = bool(existing.internal_evidence)
+            has_ext = bool(existing.external_evidence)
+            if has_int and has_ext:
+                existing.evidence_mode = "combined"
+            elif has_int:
+                existing.evidence_mode = "internal_only"
+            elif has_ext:
+                existing.evidence_mode = "external_only"
+            else:
+                existing.evidence_mode = "insufficient_evidence"
+
+            if not existing.exact_violated_passage and d.exact_violated_passage:
+                existing.exact_violated_passage = d.exact_violated_passage
+
+            if not existing.flagged_span and d.flagged_span:
+                existing.flagged_span = d.flagged_span
+
             # Preserve suggested correction if existing lacks it
             if not existing.suggested_correction and d.suggested_correction:
                 existing.suggested_correction = d.suggested_correction
+                existing.suggestion = d.suggestion or SuggestionDetails(suggested_replacement=d.suggested_correction)
 
             # Preserve uncertainty note if existing lacks it
             if not existing.uncertainty_note and d.uncertainty_note:
@@ -227,6 +271,12 @@ def deduplicate_and_synthesize_flag_drafts(
                 origin=d.origin,
                 status=d.status,
                 comments=list(d.comments or []),
+                evidence_mode=d.evidence_mode,
+                internal_evidence=list(d.internal_evidence or []),
+                external_evidence=list(d.external_evidence or []),
+                exact_violated_passage=d.exact_violated_passage,
+                flagged_span=d.flagged_span,
+                suggestion=d.suggestion,
             )
             seen[key] = draft_copy
             deduped_order.append(draft_copy)

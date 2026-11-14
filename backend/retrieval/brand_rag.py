@@ -253,6 +253,11 @@ def retrieve_guidelines(
                     passage_ref=passage_ref,
                     excerpt=m.content,
                     source_reference=f"{doc_label} [{m.category}]",
+                    document_id=m.document_id,
+                    chunk_id=m.chunk_id,
+                    section=m.section,
+                    page_number=m.page_number,
+                    similarity=round(m.similarity, 4) if m.similarity is not None else None,
                 )
             )
         return guidelines

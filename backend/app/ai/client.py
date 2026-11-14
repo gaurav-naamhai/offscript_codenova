@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
+import time
 from typing import Any, Callable, Dict, Optional, Type, TypeVar
 from pydantic import BaseModel
 
@@ -118,6 +120,14 @@ class GeminiClient:
             except Exception as exc:
                 raise GeminiConfigurationError(f"Failed to initialize Google GenAI SDK: {exc}") from exc
 
+    @property
+    def _client(self):
+        return self._genai_client
+
+    @_client.setter
+    def _client(self, value):
+        self._genai_client = value
+
     def masked_api_key(self) -> str:
         """Return safely masked API key for logging (e.g. 'AIzaSy...4F2d')."""
         if not self._api_key:
@@ -180,7 +190,7 @@ class GeminiClient:
         media_bytes: Optional[bytes],
         media_mime: Optional[str],
     ) -> T:
-        if self._genai_client is None:
+        if self._client is None and self._genai_client is None:
             raise GeminiConfigurationError("Live GenAI client is not initialized.")
 
         from google.genai import types
@@ -205,11 +215,39 @@ class GeminiClient:
         contents.append(prompt)
 
         try:
-            response = self._genai_client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
+            max_attempts = 3
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = self._client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=config,
+                    )
+                    break
+                except Exception as exc:
+                    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+                    if code is None and hasattr(exc, "response"):
+                        code = getattr(exc.response, "status_code", None) or getattr(exc.response, "status", None)
+                    try:
+                        code_int = int(code) if code is not None else None
+                    except (ValueError, TypeError):
+                        code_int = None
+                    msg = str(exc)
+                    is_server_error = (
+                        code_int in (500, 502, 503, 504)
+                        or bool(re.search(r"\b(500|502|503|504)\b", msg))
+                    )
+                    if is_server_error and attempt < max_attempts:
+                        logger.warning(
+                            "Gemini API server error (attempt %d/%d): %s. Retrying in 1s...",
+                            attempt,
+                            max_attempts,
+                            exc,
+                        )
+                        time.sleep(1)
+                        continue
+                    raise
 
             # Response is either parsed directly or available as raw text JSON
             if hasattr(response, "parsed") and response.parsed is not None:

@@ -21,7 +21,14 @@ from app.ai.schemas import (
     ExtractedClaim,
 )
 from app.config import Settings
-from app.models import ContentPayload, ExternalSource, FlagDraft
+from app.models import (
+    ContentPayload,
+    ExternalEvidence,
+    ExternalSource,
+    FlagDraft,
+    FlaggedSpan,
+    SuggestionDetails,
+)
 from app.uncertainty import needs_human
 
 logger = logging.getLogger(__name__)
@@ -258,25 +265,62 @@ def verify_claims(
     )
 
 
-def claim_finding_to_flag_draft(finding: ClaimFinding) -> FlagDraft:
-    """Convert a ClaimFinding directly to Gaurav's domain FlagDraft model.
+def claim_finding_to_flag_draft(
+    finding: ClaimFinding,
+    full_text: Optional[str] = None,
+) -> FlagDraft:
+    """Convert a ClaimFinding directly to domain FlagDraft model.
 
-    Ensures seamless compatibility with backend/app/pipeline.py and repository.
+    Ensures evidence-first presentation and seamless compatibility with backend pipeline.
     """
+    from app.ai.brand_verification import locate_flagged_span
+
     ext_sources = list(finding.external_sources)
     if not ext_sources and finding.evidence_source_url and finding.evidence_excerpt:
         ext_sources = [
             ExternalSource(
                 url=finding.evidence_source_url,
                 excerpt=finding.evidence_excerpt,
+                title=finding.evidence_title,
+                domain=finding.evidence_domain,
+                published_date=finding.evidence_published_date,
+                evidence_quality=finding.evidence_quality,
             )
         ]
+
+    span = locate_flagged_span(
+        full_text=full_text,
+        passage=finding.passage,
+        offending_words=finding.offending_words or finding.claim_text,
+        location_hint=finding.location,
+    )
+
+    ext_evidence = [
+        ExternalEvidence(
+            title=s.title or finding.evidence_title,
+            url=s.url,
+            domain=s.domain or finding.evidence_domain or "",
+            published_date=s.published_date or finding.evidence_published_date,
+            retrieved_at=s.retrieved_at or datetime.now(timezone.utc).isoformat(),
+            excerpt=s.excerpt,
+            evidence_quality=s.evidence_quality or finding.evidence_quality or "reliable",
+            status=s.status or "ok",
+            error_reason=s.error_reason,
+        )
+        for s in ext_sources
+    ]
+
+    mode = "external_only" if ext_evidence else ("insufficient_evidence" if finding.state == "insufficient_evidence" else "external_only")
+
+    sug = None
+    if finding.suggested_fix:
+        sug = SuggestionDetails(suggested_replacement=finding.suggested_fix)
 
     return FlagDraft(
         finding_type="claim",
         state=finding.state,
         passage=finding.passage,
-        location=finding.location,
+        location=span.location_label or finding.location,
         explanation=finding.explanation,
         why_it_matters=finding.why_it_matters,
         guideline_ref=None,
@@ -287,6 +331,12 @@ def claim_finding_to_flag_draft(finding: ClaimFinding) -> FlagDraft:
         origin="module",
         status="open",
         comments=[],
+        evidence_mode=mode,
+        internal_evidence=[],
+        external_evidence=ext_evidence,
+        exact_violated_passage=finding.exact_violated_passage,
+        flagged_span=span,
+        suggestion=sug,
     )
 
 

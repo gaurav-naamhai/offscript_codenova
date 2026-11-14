@@ -242,34 +242,476 @@ export default function ReviewWorkspace({
     return groups
   }
 
-  const renderGroup = (group: ServerFlag[]) => {
-    const first = group[0]
-    const wholeDraft = first.passage.trim().toLowerCase() === '(whole submission)'
-    const incomplete = first.origin === 'error'
-    const canEdit = sub.content_type === 'text' && sub.status === 'draft'
-    const suggestions = [...new Set(group.map(f => f.suggested_correction).filter((v): v is string => !!v))]
-    const conflict = suggestions.length > 1
-    const canHighlight = (f: ServerFlag) => f.state !== 'unclear' && f.state !== 'insufficient_evidence' && !(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note
-    const sharedDiff = suggestions.length === 1 && !!first.passage && !wholeDraft && group.every(canHighlight) ? compareText(first.passage, suggestions[0]) : null
-    const explain = (f: ServerFlag) => {
-      const extra = f as ServerFlag & { uncertainty_note?: string | null; guideline_refs?: NonNullable<ServerFlag['guideline_ref']>[] }
-      const refs = extra.guideline_refs?.length ? extra.guideline_refs : f.guideline_ref ? [f.guideline_ref] : []
-      return <><p>{f.explanation}</p><p>{f.why_it_matters}</p>{refs.length ? refs.map((ref, i) => <p className="source-excerpt" key={i}><strong>{ref.document}</strong> · {ref.passage_ref}<br/>{ref.excerpt}{ref.source_reference && <> · {/^(https?:\/\/)/i.test(ref.source_reference) ? <a href={ref.source_reference} target="_blank" rel="noreferrer">Source</a> : ref.source_reference}</>}</p>) : <p>No guideline reference returned.</p>}{f.external_sources?.length ? f.external_sources.map((source, i) => <p className="source-excerpt" key={i}><a href={source.url} target="_blank" rel="noreferrer">{source.url}</a>: {source.excerpt}</p>) : <p>No external evidence returned.</p>}</>
+  const renderFindingCard = (f: ServerFlag, index?: number) => {
+    const isError = f.origin === 'error'
+    const wholeDraft = f.passage.trim().toLowerCase() === '(whole submission)'
+
+    // Evidence resolution
+    const internalList = f.internal_evidence?.length
+      ? f.internal_evidence
+      : f.guideline_refs?.length
+      ? f.guideline_refs
+      : f.guideline_ref
+      ? [f.guideline_ref]
+      : []
+
+    const externalList = f.external_evidence?.length
+      ? f.external_evidence
+      : f.external_sources || []
+
+    const isInsufficient =
+      f.evidence_mode === 'insufficient_evidence' ||
+      f.state === 'insufficient_evidence' ||
+      (internalList.length === 0 && externalList.length === 0)
+
+    // Flagged text resolution
+    const span = f.flagged_span
+    const surrounding = span?.surrounding_passage || f.passage || ''
+    const exactOffending = span?.exact_text || ''
+    let renderedFlaggedContent: React.ReactNode = surrounding
+    if (exactOffending && surrounding && exactOffending !== surrounding) {
+      const idx = surrounding.indexOf(exactOffending)
+      if (idx >= 0) {
+        renderedFlaggedContent = (
+          <>
+            {surrounding.slice(0, idx)}
+            <mark className="offending-words-highlight">{exactOffending}</mark>
+            {surrounding.slice(idx + exactOffending.length)}
+          </>
+        )
+      }
     }
-    const actions = (f: ServerFlag, index: number) => <div className="preview-finding" key={f.id}><strong>Finding {index + 1} · {f.finding_type === 'brand' ? 'Brand' : 'Claim'} · {label(f.state)} · {f.status}</strong>{explain(f)}{f.origin !== 'error' && f.status === 'open' && <div className="finding-secondary"><button type="button" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>Dismiss finding {index + 1}</button>{sub.content_type === 'text' && <button type="button" onClick={() => handleRecheck(f)} disabled={!!busy}>Preview recheck</button>}</div>}{recheckPreview && recheckPreview.flagId === f.id && <div className="source-excerpt"><strong>Recheck preview</strong><p>Original issue resolved: {recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</p><p>Remaining findings: {recheckPreview.result.new_flags.length} ({recheckPreview.result.has_needs_human ? 'Requires human review' : 'No human-review flag'})</p></div>}</div>
-    const accept = (f: ServerFlag, index: number, numbered: boolean) => f.status === 'open' && f.suggested_correction && sub.content_type === 'text' ? <button type="button" onClick={() => handleResolve(f, 'accept')} disabled={!!busy} key={f.id}>{numbered ? `Accept for finding ${index + 1} (${f.finding_type === 'brand' ? 'Brand' : 'Claim'})` : 'Accept change'}</button> : null
-    return <article className={`finding${incomplete ? ' finding-incomplete' : ''}`} key={first.id}><div className="finding-detail">
-      {incomplete && <strong>Review incomplete</strong>}
-      {group.some(f => f.origin === 'fixture') && <p className="finding-note">Placeholder check</p>}
-      {group.some(f => f.state === 'insufficient_evidence') && <p className="finding-note">Needs supporting evidence.</p>}
-      {group.map(f => <div key={f.id}>{(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note && <p className="finding-note"><strong>Uncertainty:</strong> {(f as ServerFlag & { uncertainty_note?: string | null }).uncertainty_note}</p>}{f.needs_human && <p className="finding-note">Human review required.</p>}</div>)}
-      {!incomplete && <>{wholeDraft ? <p>Applies to the whole draft</p> : first.passage ? <div className="finding-copy"><strong>Text to review</strong><button className="finding-passage" type="button" aria-pressed={group.some(f => f.id === selectedId)} onClick={() => setSelectedId(group.some(f => f.id === selectedId) ? null : first.id)}>{sharedDiff ? <DiffText tokens={sharedDiff.before} changes={sharedDiff.removed} kind="removed"/> : first.passage}</button></div> : <p>Exact text location unavailable.</p>}
-      {conflict ? <><p><strong>Suggestions disagree</strong></p><details className="finding-source"><summary>Review options</summary>{suggestions.map((suggestion, n) => { const related = group.filter(f => f.suggested_correction === suggestion); const diff = !wholeDraft && related.every(canHighlight) ? compareText(first.passage, suggestion) : null; return <div className="preview-option" key={suggestion}><strong>Option {n + 1}</strong><p>{diff ? <DiffText tokens={diff.after} changes={diff.added} kind="added"/> : suggestion}</p>{related.map(f => <div key={f.id}><details><summary>{f.finding_type === 'brand' ? 'Brand' : 'Claim'} source &amp; explanation</summary>{explain(f)}</details><div className="workspace-actions finding-actions">{accept(f, group.indexOf(f), related.length > 1)}</div></div>)}</div>})}</details></> : suggestions.length === 1 && <div className="finding-copy"><strong>Suggested correction</strong><p>{sharedDiff ? <DiffText tokens={sharedDiff.after} changes={sharedDiff.added} kind="added"/> : suggestions[0]}</p>{sub.content_type !== 'text' && <p className="finding-note">This suggestion does not edit the uploaded file.</p>}</div>}</>}
-      <details className="finding-source"><summary>Sources &amp; details</summary>{group.map(actions)}</details>
-      {!incomplete && !conflict && <div className="workspace-actions finding-actions">{group.length > 1 && group.some(f => f.status === 'open' && f.suggested_correction) && sub.content_type === 'text' ? <details className="preview-accept"><summary>Accept change</summary><p>Choose one finding to resolve.</p><div className="workspace-actions">{group.map((f,i) => accept(f,i,true))}</div></details> : group.map((f,i) => accept(f,i,false))}{sub.content_type === 'text' && <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing}>Edit manually</button>}</div>}
-      {!incomplete && conflict && sub.content_type === 'text' && <div className="workspace-actions finding-actions"><button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }} disabled={!!busy || !canEdit || editing}>Edit manually</button></div>}
-      {sub.content_type === 'text' && !canEdit && !incomplete && <p className="finding-note">Manual editing is available when the submission is a draft.</p>}
-    </div></article>
+
+    // Diff resolution
+    const diff =
+      f.suggested_correction && !wholeDraft && f.passage
+        ? compareText(f.passage, f.suggested_correction)
+        : null
+
+    const modeLabel =
+      f.evidence_mode === 'combined'
+        ? 'Combined Evidence'
+        : f.evidence_mode === 'external_only'
+        ? 'External Evidence'
+        : f.evidence_mode === 'internal_only'
+        ? 'Internal Guideline'
+        : isInsufficient
+        ? 'Insufficient Evidence'
+        : f.finding_type === 'brand'
+        ? 'Internal Guideline'
+        : 'External Evidence'
+
+    return (
+      <article
+        className={`evidence-first-card${isError ? ' finding-incomplete' : ''}`}
+        key={f.id}
+      >
+        {/* Header Bar */}
+        <div className="finding-header-bar">
+          <div className="finding-header-left">
+            {index != null && (
+              <span className="finding-title-badge">Finding {index + 1}</span>
+            )}
+            <span className="finding-type-pill">
+              {f.finding_type === 'brand' ? 'Brand Guideline' : 'Fact / Claim'}
+            </span>
+            <span className={`finding-state-pill ${f.state}`}>{label(f.state)}</span>
+            <span className="finding-mode-pill">{modeLabel}</span>
+          </div>
+          <div>
+            <span
+              className="finding-mode-pill"
+              style={{
+                textTransform: 'capitalize',
+                background: f.status === 'resolved' ? '#bbf7d0' : '#f1ebe8',
+                color: f.status === 'resolved' ? '#166534' : '#4b5563',
+              }}
+            >
+              Status: {f.status}
+            </span>
+          </div>
+        </div>
+
+        {/* Section 1: Supporting Evidence (Top) */}
+        <div className="finding-section evidence-section">
+          <div className="finding-section-heading">
+            <span>1. Supporting Evidence</span>
+            {internalList.length > 0 && externalList.length > 0 && (
+              <span style={{ fontSize: '11px', color: '#6d5b56' }}>
+                {internalList.length} internal · {externalList.length} external
+              </span>
+            )}
+          </div>
+
+          <div className="evidence-group-container">
+            {/* Internal Evidence (Supabase RAG) */}
+            {internalList.map((ie, i) => (
+              <div className="evidence-block internal" key={`int-${i}`}>
+                <div className="evidence-badge-row">
+                  <span className="evidence-source-tag internal">
+                    Supabase RAG Guideline
+                  </span>
+                  <strong>{ie.document}</strong>
+                </div>
+
+                <div className="evidence-meta-chips">
+                  {ie.section && (
+                    <span className="meta-chip">Section: {ie.section}</span>
+                  )}
+                  {ie.passage_ref && ie.passage_ref !== ie.section && (
+                    <span className="meta-chip">Ref: {ie.passage_ref}</span>
+                  )}
+                  {ie.page_number != null && (
+                    <span className="meta-chip">Page {ie.page_number}</span>
+                  )}
+                  {ie.chunk_id && (
+                    <span className="meta-chip">Chunk #{ie.chunk_id}</span>
+                  )}
+                  {ie.similarity != null && (
+                    <span className="meta-chip">
+                      {Math.round(ie.similarity * 100)}% match
+                    </span>
+                  )}
+                  {ie.source_reference && (
+                    <span className="meta-chip">
+                      {/^(https?:\/\/)/i.test(ie.source_reference) ? (
+                        <a
+                          href={ie.source_reference}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Source link
+                        </a>
+                      ) : (
+                        `Source: ${ie.source_reference}`
+                      )}
+                    </span>
+                  )}
+                </div>
+
+                {/* Exact Violated Guideline Rule (Verbatim only) */}
+                {ie.exact_violated_passage && (
+                  <div className="verbatim-guideline-box">
+                    <span className="verbatim-label">
+                      Exact Violated Guideline Rule
+                    </span>
+                    <blockquote className="verbatim-text">
+                      "{ie.exact_violated_passage}"
+                    </blockquote>
+                  </div>
+                )}
+
+                {/* Retrieved Guideline Chunk Context */}
+                {ie.excerpt &&
+                  (ie.exact_violated_passage ? (
+                    <details className="retrieved-chunk-details">
+                      <summary>View full retrieved guideline chunk context</summary>
+                      <p>{ie.excerpt}</p>
+                    </details>
+                  ) : (
+                    <div style={{ marginTop: '6px' }}>
+                      <span
+                        className="verbatim-label"
+                        style={{ color: '#6d5b56' }}
+                      >
+                        Retrieved Guideline Passage
+                      </span>
+                      <p
+                        style={{
+                          fontSize: '13px',
+                          color: '#28110f',
+                          margin: '4px 0',
+                          lineHeight: '1.4',
+                        }}
+                      >
+                        {ie.excerpt}
+                      </p>
+                    </div>
+                  ))}
+              </div>
+            ))}
+
+            {/* External Evidence (Exa / Web) */}
+            {externalList.map((ee, i) => (
+              <div className="evidence-block external" key={`ext-${i}`}>
+                <div className="evidence-badge-row">
+                  <span className="evidence-source-tag external">
+                    Exa / Web Evidence
+                  </span>
+                  <strong>{ee.title || ee.domain || 'External Reference'}</strong>
+                </div>
+
+                <div className="evidence-meta-chips">
+                  {ee.domain && (
+                    <span className="meta-chip">Domain: {ee.domain}</span>
+                  )}
+                  {ee.published_date && (
+                    <span className="meta-chip">Date: {ee.published_date}</span>
+                  )}
+                  {ee.evidence_quality && (
+                    <span className="meta-chip">Quality: {ee.evidence_quality}</span>
+                  )}
+                </div>
+
+                {ee.excerpt && (
+                  <p className="external-excerpt-box">"{ee.excerpt}"</p>
+                )}
+
+                {ee.url && (
+                  <a
+                    className="external-url-link"
+                    href={ee.url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {ee.url}
+                  </a>
+                )}
+              </div>
+            ))}
+
+            {/* Insufficient Evidence Callout */}
+            {isInsufficient && (
+              <div className="evidence-block insufficient">
+                <div className="evidence-badge-row">
+                  <span className="evidence-source-tag insufficient">
+                    Evidence Gap
+                  </span>
+                  <strong>Insufficient Supporting Evidence</strong>
+                </div>
+                <p
+                  style={{
+                    fontSize: '13px',
+                    margin: '4px 0',
+                    color: '#713f12',
+                    lineHeight: '1.4',
+                  }}
+                >
+                  No internal guidelines or verified external evidence were found to
+                  establish compliance or truthfulness for this statement. Human
+                  verification is required.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Section 2: Flagged Content */}
+        <div className="finding-section flagged-section">
+          <div className="finding-section-heading">
+            <span>2. Flagged Content</span>
+            {f.location && <span className="meta-chip">{f.location}</span>}
+          </div>
+
+          {wholeDraft ? (
+            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>
+              Applies to the whole draft submission.
+            </p>
+          ) : f.passage ? (
+            <button
+              type="button"
+              className="flagged-text-display"
+              aria-pressed={selectedId === f.id}
+              onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
+              title="Click to highlight location in draft text"
+            >
+              {renderedFlaggedContent}
+            </button>
+          ) : (
+            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>
+              Exact text location unavailable.
+            </p>
+          )}
+        </div>
+
+        {/* Section 3: Explanation & Impact */}
+        <div className="finding-section explanation-section">
+          <div className="finding-section-heading">
+            <span>3. Conflict Explanation &amp; Impact</span>
+          </div>
+
+          <p className="explanation-body">{f.explanation}</p>
+
+          {f.why_it_matters && (
+            <div className="why-matters-body">
+              <strong>Why it matters:</strong> {f.why_it_matters}
+            </div>
+          )}
+
+          {f.uncertainty_note && (
+            <div className="uncertainty-box">
+              <strong>Uncertainty Note:</strong> {f.uncertainty_note}
+            </div>
+          )}
+
+          {f.needs_human && (
+            <div style={{ marginTop: '8px' }}>
+              <span className="finding-state-pill insufficient_evidence">
+                Human Review Required
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Section 4: Suggestions & Actions */}
+        <div className="finding-section suggestions-section">
+          <div className="finding-section-heading">
+            <span>4. Suggestions &amp; Actions</span>
+          </div>
+
+          {f.suggested_correction ? (
+            <div className="suggestion-block">
+              <div className="suggestion-title">Suggested Minimal Correction</div>
+              <div className="suggestion-diff-box">
+                {diff ? (
+                  <DiffText
+                    tokens={diff.after}
+                    changes={diff.added}
+                    kind="added"
+                  />
+                ) : (
+                  <strong>{f.suggested_correction}</strong>
+                )}
+              </div>
+
+              {f.suggestion?.change_rationale && (
+                <p className="suggestion-rationale">
+                  {f.suggestion.change_rationale}
+                </p>
+              )}
+
+              {f.suggestion?.preserved_entities &&
+                f.suggestion.preserved_entities.length > 0 && (
+                  <div className="preserved-entities-row">
+                    <span>Preserved entities:</span>
+                    {f.suggestion.preserved_entities.map((ent, ei) => (
+                      <span className="preserved-entity-chip" key={ei}>
+                        {ent}
+                      </span>
+                    ))}
+                  </div>
+                )}
+            </div>
+          ) : (
+            <p
+              style={{
+                fontSize: '13px',
+                color: '#6d5b56',
+                margin: '0 0 10px 0',
+              }}
+            >
+              No automated correction suggested. Manual adjustment or human decision
+              required.
+            </p>
+          )}
+
+          {/* Action buttons */}
+          <div className="action-buttons-row">
+            {f.status === 'open' &&
+              f.suggested_correction &&
+              sub.content_type === 'text' && (
+                <button
+                  type="button"
+                  className="btn-accept"
+                  onClick={() => handleResolve(f, 'accept')}
+                  disabled={!!busy}
+                >
+                  Accept change
+                </button>
+              )}
+
+            {sub.content_type === 'text' && (
+              <button
+                type="button"
+                className="btn-recheck"
+                onClick={() => handleRecheck(f)}
+                disabled={!!busy}
+              >
+                Preview recheck
+              </button>
+            )}
+
+            {f.origin !== 'error' && f.status === 'open' && (
+              <button
+                type="button"
+                className="btn-dismiss"
+                onClick={() => handleResolve(f, 'dismiss')}
+                disabled={!!busy}
+              >
+                Dismiss finding
+              </button>
+            )}
+
+            {sub.content_type === 'text' && sub.status === 'draft' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditValue(sub.text || '')
+                  setEditing(true)
+                }}
+                disabled={!!busy || editing}
+              >
+                Edit manually
+              </button>
+            )}
+          </div>
+
+          {/* Inline Recheck Preview */}
+          {recheckPreview && recheckPreview.flagId === f.id && (
+            <div className="recheck-result-box">
+              <strong>Recheck simulation results:</strong>
+              <p style={{ margin: '4px 0' }}>
+                Original issue resolved:{' '}
+                <strong>
+                  {recheckPreview.result.original_flag_gone
+                    ? 'Yes (resolved)'
+                    : 'No (still flagged)'}
+                </strong>
+              </p>
+              <p style={{ margin: '4px 0' }}>
+                Remaining findings: {recheckPreview.result.new_flags.length} (
+                {recheckPreview.result.has_needs_human
+                  ? 'Requires human review'
+                  : 'No human-review flags'}
+                )
+              </p>
+            </div>
+          )}
+        </div>
+      </article>
+    )
+  }
+
+  const renderGroup = (group: ServerFlag[]) => {
+    if (group.length === 1) {
+      return renderFindingCard(group[0])
+    }
+
+    const first = group[0]
+    const suggestions = [
+      ...new Set(
+        group.map(f => f.suggested_correction).filter((v): v is string => !!v)
+      ),
+    ]
+    const conflict = suggestions.length > 1
+
+    return (
+      <div key={first.id} style={{ marginTop: '16px' }}>
+        {conflict && (
+          <div
+            className="workspace-notice"
+            style={{
+              background: '#fef3c7',
+              color: '#92400e',
+              marginBottom: '10px',
+            }}
+          >
+            <strong>Multiple findings apply to this passage with different suggestions.</strong>
+          </div>
+        )}
+        {group.map((f, i) => renderFindingCard(f, i))}
+      </div>
+    )
   }
 
   return (
@@ -332,12 +774,37 @@ export default function ReviewWorkspace({
               </>
             ) : sub.content_type === 'text' ? (
               <p className="workspace-text">
-                {selectedFlag && selectedFlag.passage && sub.text?.includes(selectedFlag.passage) ? (
-                  <>
-                    {sub.text.slice(0, sub.text.indexOf(selectedFlag.passage))}
-                    <mark>{selectedFlag.passage}</mark>
-                    {sub.text.slice(sub.text.indexOf(selectedFlag.passage) + selectedFlag.passage.length)}
-                  </>
+                {selectedFlag ? (
+                  (() => {
+                    const text = sub.text || ''
+                    const span = selectedFlag.flagged_span
+                    if (
+                      span?.start_char != null &&
+                      span?.end_char != null &&
+                      span.start_char >= 0 &&
+                      span.end_char <= text.length &&
+                      span.start_char < span.end_char
+                    ) {
+                      return (
+                        <>
+                          {text.slice(0, span.start_char)}
+                          <mark>{text.slice(span.start_char, span.end_char)}</mark>
+                          {text.slice(span.end_char)}
+                        </>
+                      )
+                    }
+                    if (selectedFlag.passage && text.includes(selectedFlag.passage)) {
+                      const idx = text.indexOf(selectedFlag.passage)
+                      return (
+                        <>
+                          {text.slice(0, idx)}
+                          <mark>{selectedFlag.passage}</mark>
+                          {text.slice(idx + selectedFlag.passage.length)}
+                        </>
+                      )
+                    }
+                    return text || 'No text content.'
+                  })()
                 ) : (
                   sub.text || 'No text content.'
                 )}
