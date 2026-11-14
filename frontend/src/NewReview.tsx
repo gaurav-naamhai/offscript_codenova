@@ -85,6 +85,14 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
   const [fileError, setFileError] = useState('')
   const [busy, setBusy] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
+  const [longWait, setLongWait] = useState(false)
+  const [createdId, setCreatedId] = useState<string | null>(null)
+  const submitting = useRef(false)
+  useEffect(() => {
+    if (!busy) { setLongWait(false); return }
+    const timer = window.setTimeout(() => setLongWait(true), 5000)
+    return () => window.clearTimeout(timer)
+  }, [busy])
   const imageUrl = useFileUrl(files.Image)
   const pdfUrl = useFileUrl(files.PDF)
   const currentFile = draft.format === 'Text' ? null : files[draft.format]
@@ -107,6 +115,7 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
   }
 
   async function submitForReview() {
+    if (submitting.current || createdId) return
     const next: string[] = []
     if (draft.format === 'Text' && !draft.text.trim()) next.push('Enter content to review.')
     if (draft.format !== 'Text' && !currentFile) next.push(`Choose a ${draft.format} file.`)
@@ -114,8 +123,9 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
     setErrors(next)
     if (next.length > 0) return
 
+    submitting.current = true
     setBusy(true)
-    setStatusMessage('Uploading submission to compliance server...')
+    setStatusMessage('Submitting content…')
     try {
       const type = draft.format.toLowerCase() as ContentType
       const created = await serverApi.create(
@@ -127,13 +137,16 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
         draft.channel,
         draft.context.trim() || undefined
       )
-      setStatusMessage('Running brand guideline & claim verification checks...')
+      setCreatedId(created.id)
+      setStatusMessage('Reviewing content…')
       await serverApi.check(created.id)
       onCreated(created.id)
     } catch (err) {
       setBusy(false)
       setStatusMessage('')
       setErrors([err instanceof Error ? err.message : 'Submission failed. Please verify server connection and try again.'])
+    } finally {
+      submitting.current = false
     }
   }
 
@@ -166,18 +179,19 @@ export default function NewReview({ onCreated }: { onCreated: (id: string) => vo
           <p>Guidelines are selected by the review service. Sources used are shown with the results when available.</p>
         </div>
       </div>
-      {statusMessage && <p className="save-feedback" role="status">{statusMessage}</p>}
+      <div role="status" aria-live="polite" aria-atomic="true">{statusMessage && <p className="save-feedback">{statusMessage}{longWait && statusMessage === 'Reviewing content…' && ' Still reviewing. Please keep this page open.'}</p>}</div>
       {errors.length > 0 && (
         <div className="validation" role="alert">
           <strong>Please address the following:</strong>
           <ul>{errors.map(error => <li key={error}>{error}</li>)}</ul>
         </div>
       )}
+      {createdId && !busy && <p>Content was submitted. Open the saved review to check its status before taking further action. <button type="button" onClick={() => onCreated(createdId)}>Open saved review</button></p>}
       <div className="review-footer">
         <p>Results may include placeholder checks or incomplete checks.</p>
         <div>
-          <button type="button" className="primary-button" onClick={submitForReview} disabled={busy}>
-            {busy ? 'Running compliance check...' : 'Submit for review'} <span aria-hidden="true">→</span>
+          <button type="button" className="primary-button" onClick={submitForReview} disabled={busy || !!createdId}>
+            {busy ? statusMessage : 'Submit for review'} <span aria-hidden="true">→</span>
           </button>
         </div>
       </div>

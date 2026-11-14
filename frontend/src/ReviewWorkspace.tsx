@@ -204,7 +204,7 @@ export default function ReviewWorkspace({
   if (loading) {
     return (
       <div className="review-workspace">
-        <p className="workspace-notice" role="status">Loading review workspace from server...</p>
+        <p className="workspace-notice" role="status">Preparing results…</p>
       </div>
     )
   }
