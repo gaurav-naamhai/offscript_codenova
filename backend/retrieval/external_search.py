@@ -316,6 +316,12 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
                         ExternalSource(
                             url=e.url,
                             excerpt=e.excerpt or f"Source unavailable ({e.error_reason or 'unreachable'})",
+                            title=e.title,
+                            domain=e.domain,
+                            published_date=e.published_date,
+                            retrieved_at=e.retrieved_at,
+                            status=e.status,
+                            error_reason=e.error_reason,
                         )
                         for e in evidence_items
                     ],
@@ -371,7 +377,16 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
                     why_it_matters=verdict.get("why_it_matters")
                     or "Factual accuracy protects brand credibility and regulatory compliance.",
                     external_sources=[
-                        ExternalSource(url=e.url, excerpt=e.excerpt[:400]) for e in ok_sources
+                        ExternalSource(
+                            url=e.url,
+                            excerpt=e.excerpt[:400],
+                            title=e.title,
+                            domain=e.domain,
+                            published_date=e.published_date,
+                            retrieved_at=e.retrieved_at,
+                            status=e.status,
+                        )
+                        for e in ok_sources
                     ],
                     uncertainty_note=verdict.get("uncertainty_note"),
                     suggested_correction=verdict.get("suggested_correction"),
@@ -389,7 +404,16 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
                     explanation="Automated assessment of external evidence encountered an error; human verification required.",
                     why_it_matters="Uncertain claim verifications must be escalated to a human reviewer.",
                     external_sources=[
-                        ExternalSource(url=e.url, excerpt=e.excerpt[:400]) for e in ok_sources
+                        ExternalSource(
+                            url=e.url,
+                            excerpt=e.excerpt[:400],
+                            title=e.title,
+                            domain=e.domain,
+                            published_date=e.published_date,
+                            retrieved_at=e.retrieved_at,
+                            status=e.status,
+                        )
+                        for e in ok_sources
                     ],
                     uncertainty_note=f"Evaluation error: {type(exc).__name__}",
                     origin="module",

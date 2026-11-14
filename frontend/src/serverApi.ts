@@ -2,7 +2,73 @@ export type RecurringInsights = { top_guidelines: Record<string, unknown>[]; sta
 export type ContentType = 'text' | 'image' | 'pdf'
 export type ServerSubmission = { id: string; content_type: string; status: string; version: number; title?: string | null; audience?: string | null; channel?: string | null; context?: string | null; text?: string | null; file_name?: string | null; file_mime?: string | null; created_at: string; updated_at: string }
 export type SubmissionSummary = { id: string; content_type: string; status: string; version: number; title?: string | null; audience?: string | null; channel?: string | null; context?: string | null; created_at: string; flag_count: number; needs_human_count: number }
-export type ServerFlag = { id: string; finding_type: 'brand' | 'claim'; state: string; passage: string; location: string; explanation: string; why_it_matters: string; origin: 'module' | 'fixture' | 'error'; status: string; needs_human: boolean; suggested_correction?: string | null; guideline_ref?: { document: string; passage_ref: string; excerpt: string; source_reference?: string | null } | null; external_sources?: { url: string; excerpt: string }[] }
+
+export type EvidenceMode = 'internal_only' | 'external_only' | 'combined' | 'insufficient_evidence'
+
+export type InternalEvidence = {
+  document: string
+  passage_ref: string
+  excerpt: string
+  source_reference?: string | null
+  document_id?: string | null
+  chunk_id?: string | null
+  section?: string | null
+  page_number?: number | null
+  similarity?: number | null
+  exact_violated_passage?: string | null
+}
+
+export type ExternalEvidence = {
+  url: string
+  excerpt: string
+  title?: string | null
+  domain?: string | null
+  published_date?: string | null
+  retrieved_at?: string | null
+  evidence_quality?: string | null
+  status?: string | null
+  error_reason?: string | null
+}
+
+export type FlaggedSpan = {
+  exact_text: string
+  start_char?: number | null
+  end_char?: number | null
+  surrounding_passage?: string | null
+  location_label?: string | null
+}
+
+export type SuggestionDetails = {
+  suggested_replacement?: string | null
+  change_rationale?: string | null
+  preserved_entities?: string[]
+}
+
+export type ServerFlag = {
+  id: string
+  submission_id?: string
+  version?: number
+  finding_type: 'brand' | 'claim'
+  state: string
+  passage: string
+  location: string
+  explanation: string
+  why_it_matters: string
+  origin: 'module' | 'fixture' | 'error'
+  status: string
+  needs_human: boolean
+  suggested_correction?: string | null
+  uncertainty_note?: string | null
+  guideline_ref?: InternalEvidence | null
+  guideline_refs?: InternalEvidence[]
+  external_sources?: ExternalEvidence[]
+  evidence_mode?: EvidenceMode
+  internal_evidence?: InternalEvidence[]
+  external_evidence?: ExternalEvidence[]
+  exact_violated_passage?: string | null
+  flagged_span?: FlaggedSpan | null
+  suggestion?: SuggestionDetails | null
+}
 export type DemoRole = 'creator' | 'manager' | 'authorised_reviewer'
 export type ServerComment = { id: string; role: string; text: string; version: number; created_at: string }
 export type ServerDecision = { id: string; role: string; decision: string; comment?: string | null; version: number; created_at: string }

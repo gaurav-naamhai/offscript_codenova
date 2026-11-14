@@ -184,7 +184,7 @@ def check_brand(
         if content.file_bytes:
             brand_output = verify_brand(content, guidelines=guidelines, client=ai_client)
             for f in brand_output.findings:
-                draft = brand_finding_to_flag_draft(f)
+                draft = brand_finding_to_flag_draft(f, full_text=content.text)
                 if not draft.guideline_ref and ref:
                     draft.guideline_ref = ref
                     draft.guideline_refs = [ref]
@@ -253,7 +253,7 @@ def check_brand(
         # 2. Run multimodal brand verification across document
         brand_output = verify_brand(content, guidelines=guidelines, client=ai_client)
         for f in brand_output.findings:
-            draft = brand_finding_to_flag_draft(f)
+            draft = brand_finding_to_flag_draft(f, full_text=content.text)
             if not draft.guideline_ref and ref:
                 draft.guideline_ref = ref
                 draft.guideline_refs = [ref]
@@ -319,7 +319,7 @@ def check_brand(
             if corr and corr.suggested_replacement and corr.suggested_replacement != finding.passage:
                 finding.suggested_fix = corr.suggested_replacement
 
-        draft = brand_finding_to_flag_draft(finding)
+        draft = brand_finding_to_flag_draft(finding, full_text=content.text)
         if not draft.guideline_ref and ref:
             draft.guideline_ref = ref
             draft.guideline_refs = [ref]

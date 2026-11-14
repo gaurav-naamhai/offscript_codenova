@@ -5,7 +5,7 @@ import logging
 from typing import Callable, List, Optional, Tuple
 import uuid
 
-from app.models import ContentPayload, DegradedModule, Flag, FlagDraft, GuidelineRef
+from app.models import ContentPayload, DegradedModule, Flag, FlagDraft, FlaggedSpan, GuidelineRef
 from app.plugins import brand_check, retrieval, verification
 from app.uncertainty import needs_human
 
@@ -23,6 +23,12 @@ def _draft_to_flag(draft: FlagDraft, submission_id: str, version: int, now_iso: 
         suggested_correction=draft.suggested_correction, origin=draft.origin,
         status=draft.status, comments=list(draft.comments),
         needs_human=needs_human(draft.state), created_at=now_iso,
+        evidence_mode=draft.evidence_mode,
+        internal_evidence=draft.internal_evidence,
+        external_evidence=draft.external_evidence,
+        exact_violated_passage=draft.exact_violated_passage,
+        flagged_span=draft.flagged_span,
+        suggestion=draft.suggestion,
     )
 
 
@@ -37,6 +43,14 @@ def _make_error_flag(module: str, submission_id: str, version: int, now_iso: str
         guideline_ref=None, guideline_refs=[], external_sources=[], uncertainty_note=None,
         suggested_correction=None, origin="error", status="open", comments=[],
         needs_human=True, created_at=now_iso,
+        evidence_mode="insufficient_evidence",
+        internal_evidence=[],
+        external_evidence=[],
+        flagged_span=FlaggedSpan(
+            exact_text="(whole submission)",
+            surrounding_passage="(whole submission)",
+            location_label="submission",
+        ),
     )
 
 

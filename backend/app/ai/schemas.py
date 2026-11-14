@@ -19,9 +19,14 @@ from pydantic import BaseModel, Field
 from app.models import (
     BRAND_STATES,
     CLAIM_STATES,
+    EvidenceMode,
+    ExternalEvidence,
     ExternalSource,
     FlagDraft,
+    FlaggedSpan,
     GuidelineRef,
+    InternalEvidence,
+    SuggestionDetails,
 )
 
 
@@ -107,6 +112,15 @@ class BrandFinding(BaseModel):
     guideline_document: Optional[str] = Field(default=None, description="Source guideline document name")
     guideline_section: Optional[str] = Field(default=None, description="Section or rule identifier")
     guideline_excerpt: Optional[str] = Field(default=None, description="Relevant excerpt from the guideline")
+    exact_violated_passage: Optional[str] = Field(
+        default=None,
+        description="Exact verbatim guideline sentence/rule violated (must be substring of retrieved chunk)",
+    )
+    chunk_id: Optional[str] = Field(default=None, description="Supabase chunk UUID")
+    guideline_document_id: Optional[str] = Field(default=None, description="Supabase document UUID")
+    page_number: Optional[int] = Field(default=None, description="Page number of guideline")
+    similarity: Optional[float] = Field(default=None, description="Cosine similarity score")
+    offending_words: Optional[str] = Field(default=None, description="Precise offending words or tokens")
     suggested_fix: Optional[str] = Field(default=None, description="Initial suggested replacement text")
     uncertainty_note: Optional[str] = Field(
         default=None, description="Explanation if evaluation is borderline or ambiguous"
@@ -143,7 +157,14 @@ class ClaimFinding(BaseModel):
     explanation: str = Field(description="Clear rationale comparing the claim against retrieved evidence")
     why_it_matters: str = Field(description="Legal, regulatory, or reputation risk of unverified claim")
     evidence_source_url: Optional[str] = Field(default=None, description="Source URL or document reference")
+    evidence_title: Optional[str] = Field(default=None, description="Source web page or document title")
+    evidence_domain: Optional[str] = Field(default=None, description="Source domain")
+    evidence_published_date: Optional[str] = Field(default=None, description="Publication date if available")
     evidence_excerpt: Optional[str] = Field(default=None, description="Verbatim citation supporting the verdict")
+    exact_violated_passage: Optional[str] = Field(
+        default=None, description="Exact factual assertion refuting claim"
+    )
+    offending_words: Optional[str] = Field(default=None, description="Precise offending words or tokens")
     evidence_quality: EvidenceQuality = Field(
         default="none", description="Assessment of evidence freshness and reliability"
     )
@@ -161,11 +182,21 @@ class ClaimFinding(BaseModel):
         # Auto-sync external_sources list and single url/excerpt fields
         if not self.external_sources and self.evidence_source_url and self.evidence_excerpt:
             self.external_sources = [
-                ExternalSource(url=self.evidence_source_url, excerpt=self.evidence_excerpt)
+                ExternalSource(
+                    url=self.evidence_source_url,
+                    excerpt=self.evidence_excerpt,
+                    title=self.evidence_title,
+                    domain=self.evidence_domain,
+                    published_date=self.evidence_published_date,
+                    evidence_quality=self.evidence_quality,
+                )
             ]
         elif self.external_sources and not self.evidence_source_url:
             self.evidence_source_url = self.external_sources[0].url
             self.evidence_excerpt = self.external_sources[0].excerpt
+            self.evidence_title = self.external_sources[0].title
+            self.evidence_domain = self.external_sources[0].domain
+            self.evidence_published_date = self.external_sources[0].published_date
 
 
 class ClaimVerificationOutput(BaseModel):
@@ -180,7 +211,7 @@ class ClaimVerificationOutput(BaseModel):
 
 
 class SynthesizedFlag(BaseModel):
-    """Direct bridge to Gaurav's FlagDraft model."""
+    """Direct bridge to domain FlagDraft model."""
 
     finding_type: Literal["brand", "claim"]
     state: str
@@ -198,12 +229,20 @@ class SynthesizedFlag(BaseModel):
     comments: List[str] = Field(default_factory=list)
     needs_human: bool = False
 
+    # Evidence-first structured additions
+    evidence_mode: Optional[EvidenceMode] = None
+    internal_evidence: List[InternalEvidence] = Field(default_factory=list)
+    external_evidence: List[ExternalEvidence] = Field(default_factory=list)
+    exact_violated_passage: Optional[str] = None
+    flagged_span: Optional[FlaggedSpan] = None
+    suggestion: Optional[SuggestionDetails] = None
+
     def model_post_init(self, __context):
         from app.uncertainty import needs_human
         self.needs_human = needs_human(self.state)
 
     def to_flag_draft(self) -> FlagDraft:
-        """Convert synthesized flag directly into Gaurav's domain FlagDraft."""
+        """Convert synthesized flag directly into domain FlagDraft."""
         return FlagDraft(
             finding_type=self.finding_type,
             state=self.state,
@@ -219,6 +258,12 @@ class SynthesizedFlag(BaseModel):
             origin=self.origin,
             status=self.status,
             comments=self.comments,
+            evidence_mode=self.evidence_mode,
+            internal_evidence=self.internal_evidence,
+            external_evidence=self.external_evidence,
+            exact_violated_passage=self.exact_violated_passage,
+            flagged_span=self.flagged_span,
+            suggestion=self.suggestion,
         )
 
 

@@ -106,11 +106,24 @@ class GuidelineRef(BaseModel):
     passage_ref: str
     excerpt: str
     source_reference: Optional[str] = None
+    document_id: Optional[str] = None
+    chunk_id: Optional[str] = None
+    section: Optional[str] = None
+    page_number: Optional[int] = None
+    similarity: Optional[float] = None
+    exact_violated_passage: Optional[str] = None
 
 
 class ExternalSource(BaseModel):
     url: str
     excerpt: str
+    title: Optional[str] = None
+    domain: Optional[str] = None
+    published_date: Optional[str] = None
+    retrieved_at: Optional[str] = None
+    evidence_quality: Optional[str] = "reliable"
+    status: Optional[str] = "ok"
+    error_reason: Optional[str] = None
 
 
 class FlagDraft(BaseModel):
