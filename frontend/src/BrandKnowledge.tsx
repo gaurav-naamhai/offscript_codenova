@@ -1,11 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiBase } from './serverApi'
 import { guidanceCategories } from './knowledgeData'
 import { listBrandDocuments } from './brandDocuments'
 import type { BrandDocument } from './brandDocuments'
 import './KnowledgeInsights.css'
 
-export default function BrandKnowledge({ initialSelectedId }: { initialSelectedId?: string | null }) {
+export default function BrandKnowledge({ initialSelectedId, focusUpload = false }: { initialSelectedId?: string | null; focusUpload?: boolean }) {
+  const uploadInput = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (focusUpload) {
+      uploadInput.current?.focus()
+      uploadInput.current?.scrollIntoView({ block: 'center' })
+    }
+  }, [focusUpload])
   const [docs, setDocs] = useState<BrandDocument[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
@@ -111,7 +118,7 @@ export default function BrandKnowledge({ initialSelectedId }: { initialSelectedI
         <section className="panel ki-panel">
           <h2>Upload guidelines</h2>
           <label className="ki-field">Choose file (PDF, image, or txt)
-            <input key={selected ?? 'new'} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt" onChange={e => { const next = e.target.files?.[0] || null; setFile(next); setTitle(next ? next.name.replace(/\.[^.]+$/, '') || next.name : '') }} />
+            <input ref={uploadInput} key={selected ?? 'new'} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt" onChange={e => { const next = e.target.files?.[0] || null; setFile(next); setTitle(next ? next.name.replace(/\.[^.]+$/, '') || next.name : '') }} />
           </label>
           {file && <label className="ki-field">Title (optional rename)<input value={title} onChange={e => setTitle(e.target.value)} /></label>}
           <details><summary>Optional details</summary>

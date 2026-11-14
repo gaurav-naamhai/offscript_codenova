@@ -1,36 +1,41 @@
 import { useEffect, useState } from 'react'
 import './ReviewWorkflow.css'
 
-const captions = ['Add your content', 'Check against guidance', 'Review suggested changes'] as const
+const scenes = [
+  { title: 'Add brand guidelines', description: 'Upload approved guidelines and facts in Brand Knowledge.', image: 'workflow-guidelines-v2.png', destination: 'Brand Knowledge upload' },
+  { title: 'Add your content', description: 'Paste text or upload an image or PDF in New Review.', image: 'workflow-content-v2.png', destination: 'New Review' },
+  { title: 'Let the review run', description: 'Your content is checked against available guidance and evidence.', image: 'workflow-review-v2.png', destination: 'Review Library' },
+  { title: 'Review suggested changes', description: 'Compare wording, open sources, and accept or edit suggestions.', image: 'workflow-results-v2.png', destination: 'Review Library' },
+] as const
 
-function Scene({ kind, active }: { kind: 0 | 1 | 2; active: boolean }) {
-  return <div className={`workflow-scene workflow-scene-${kind}`} data-active={active}>
-    <div className="workflow-copy"><span className="workflow-number">0{kind + 1} / 03</span><h3>{captions[kind]}</h3></div>
-    <div className="workflow-art" aria-hidden="true">
-      {kind === 0 && <><div className="workflow-document upload-document"><span/><span/><span/></div><div className="workflow-tray"><span>↑</span></div></>}
-      {kind === 1 && <><div className="workflow-document review-document"><span/><span className="highlight"/><span/></div><div className="workflow-connector"/><div className="workflow-guidance"><strong>Guideline</strong><span>Use clear language</span><i/><i/></div></>}
-      {kind === 2 && <div className="workflow-result"><div><small>Original</small><span>Original wording</span></div><div><small>Suggested</small><span>Revised wording</span></div><footer><span>ⓘ Source</span><span>◉ Human review</span></footer></div>}
-    </div>
-  </div>
+function Scene({ scene, active, onClick, onInteraction }: { scene: typeof scenes[number]; active: boolean; onClick: () => void; onInteraction: (value: boolean) => void }) {
+  return <button type="button" className="workflow-scene" data-active={active} onClick={onClick}
+    onPointerEnter={() => onInteraction(true)} onPointerLeave={() => onInteraction(false)}
+    onFocus={() => onInteraction(true)} onBlur={() => onInteraction(false)}
+    aria-label={`${scene.title}. Opens ${scene.destination}.`}>
+    <span className="workflow-art" aria-hidden="true"><img src={`${import.meta.env.BASE_URL}assets/${scene.image}`} alt="" /></span>
+    <span className="workflow-copy"><span className="workflow-card-title">{scene.title}</span><span className="workflow-description">{scene.description}</span>{scene.destination === 'Review Library' && <span className="workflow-destination">Open Review Library</span>}</span>
+  </button>
 }
 
-export default function ReviewWorkflow() {
+export default function ReviewWorkflow({ onGuidelines, onContent, onLibrary }: { onGuidelines: () => void; onContent: () => void; onLibrary: () => void }) {
   const [paused, setPaused] = useState(false)
   const [hidden, setHidden] = useState(() => document.hidden)
   const [active, setActive] = useState(0)
+  const [interacting, setInteracting] = useState(false)
   useEffect(() => {
     const update = () => setHidden(document.hidden)
     document.addEventListener('visibilitychange', update)
     return () => document.removeEventListener('visibilitychange', update)
   }, [])
   useEffect(() => {
-    if (paused || hidden) return
-    const timer = window.setInterval(() => setActive(value => (value + 1) % 3), 3000)
+    if (paused || hidden || interacting) return
+    const timer = window.setInterval(() => setActive(value => (value + 1) % scenes.length), 3000)
     return () => window.clearInterval(timer)
-  }, [paused, hidden])
+  }, [paused, hidden, interacting])
 
-  return <section className="panel workflow" aria-labelledby="workflow-title" data-paused={paused || hidden}>
+  return <section className="panel workflow" aria-labelledby="workflow-title" data-paused={paused || hidden || interacting}>
     <div className="workflow-heading"><div><span className="workflow-label">Illustrative workflow</span><h2 id="workflow-title">How your review works</h2></div><button className="workflow-pause" type="button" onClick={() => setPaused(value => !value)} aria-label={paused ? 'Resume workflow animation' : 'Pause workflow animation'}>{paused ? '▶ Resume' : 'Ⅱ Pause'}</button></div>
-    <div className="workflow-window"><div className="workflow-track"><Scene kind={0} active={active === 0}/><Scene kind={1} active={active === 1}/><Scene kind={2} active={active === 2}/></div></div>
+    <div className="workflow-window"><div className="workflow-track">{scenes.map((scene, index) => <Scene key={scene.image} scene={scene} active={active === index} onClick={[onGuidelines, onContent, onLibrary, onLibrary][index]} onInteraction={setInteracting}/>)}</div></div>
   </section>
 }

@@ -242,6 +242,7 @@ function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
+  const [focusKnowledgeUpload, setFocusKnowledgeUpload] = useState(false)
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -267,6 +268,7 @@ function App() {
 
   function navigate(next: Page) {
     if (next === 'knowledge') setSelectedDocument(null)
+    setFocusKnowledgeUpload(false)
     if (next === 'review') {
       setActiveId(null)
     }
@@ -292,7 +294,7 @@ function App() {
           </div>
         )}
         {page === 'knowledge' ? (
-          <BrandKnowledge key={selectedDocument || 'all'} initialSelectedId={selectedDocument} />
+          <BrandKnowledge key={selectedDocument || 'all'} initialSelectedId={selectedDocument} focusUpload={focusKnowledgeUpload} />
         ) : page === 'insights' ? (
           <Insights />
         ) : page === 'library' ? (
@@ -331,7 +333,7 @@ function App() {
           <>
             <Hero onStart={() => navigate('review')} onLibrary={() => navigate('library')} />
             <StatusSummary submissions={submissions} />
-            <div className="dashboard-grid"><ReviewWorkflow /></div>
+            <div className="dashboard-grid"><ReviewWorkflow onGuidelines={() => { navigate('knowledge'); setFocusKnowledgeUpload(true) }} onContent={() => navigate('review')} onLibrary={() => navigate('library')} /></div>
           </>
         )}
       </main>
