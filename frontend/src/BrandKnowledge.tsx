@@ -1,21 +1,12 @@
 import { useEffect, useState } from 'react'
 import { apiBase } from './serverApi'
 import { guidanceCategories } from './knowledgeData'
+import { listBrandDocuments } from './brandDocuments'
+import type { BrandDocument } from './brandDocuments'
 import './KnowledgeInsights.css'
 
-type ServerBrandDoc = {
-  id: string
-  title: string
-  category: string
-  version: string
-  is_active: boolean
-  source_filename?: string | null
-  created_at?: string
-  chunks_count?: number
-}
-
-export default function BrandKnowledge() {
-  const [docs, setDocs] = useState<ServerBrandDoc[]>([])
+export default function BrandKnowledge({ initialSelectedId }: { initialSelectedId?: string | null }) {
+  const [docs, setDocs] = useState<BrandDocument[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -23,7 +14,7 @@ export default function BrandKnowledge() {
   const [feedback, setFeedback] = useState('')
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState('All')
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(initialSelectedId || null)
   const [title, setTitle] = useState('')
   const [group, setGroup] = useState<string>('guideline')
   const [version, setVersion] = useState('1.0')
@@ -33,11 +24,7 @@ export default function BrandKnowledge() {
   async function fetchDocs() {
     setLoading(true)
     try {
-      const res = await fetch(`${apiBase}/brand-docs`)
-      if (!res.ok) throw new Error(`Server returned ${res.status}`)
-      const data = await res.json()
-      if (!Array.isArray(data.documents)) throw new Error('Unexpected document list response.')
-      const list: ServerBrandDoc[] = data.documents
+      const list = await listBrandDocuments()
       setDocs(list)
       setLoadError('')
     } catch (err) {
@@ -51,7 +38,7 @@ export default function BrandKnowledge() {
     void fetchDocs()
   }, [])
 
-  function matches(item: ServerBrandDoc) {
+  function matches(item: BrandDocument) {
     const q = search.toLowerCase().trim()
     const matchText = !q || item.title.toLowerCase().includes(q) || (item.source_filename || '').toLowerCase().includes(q)
     const matchCat = category === 'All' || item.category.toLowerCase() === category.toLowerCase()
@@ -82,7 +69,7 @@ export default function BrandKnowledge() {
         const errBody = await res.json().catch(() => ({}))
         throw new Error(errBody.detail || `Upload failed (${res.status})`)
       }
-      const created: ServerBrandDoc = await res.json()
+      const created: BrandDocument = await res.json()
       setFeedback(`Upload completed: "${created.title}". Check the document list for its current status.`)
       setTitle('')
       setVersion('1.0')

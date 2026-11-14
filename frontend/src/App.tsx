@@ -5,6 +5,8 @@ import BrandKnowledge from './BrandKnowledge'
 import Insights from './Insights'
 import NewReview from './NewReview'
 import ReviewWorkspace from './ReviewWorkspace'
+import GlobalSearch from './GlobalSearch'
+import ReviewWorkflow from './ReviewWorkflow'
 import { serverApi } from './serverApi'
 import type { SubmissionSummary } from './serverApi'
 import './App.css'
@@ -118,9 +120,9 @@ function Icon({ name, className = '' }: { name: IconName; className?: string }) 
 function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) => void }) {
   const nav: { label: string; icon: IconName; target: Page }[] = [
     { label: 'Dashboard', icon: 'home', target: 'dashboard' },
-    { label: 'New review', icon: 'plus', target: 'review' },
-    { label: 'Review library', icon: 'layers', target: 'library' },
-    { label: 'Brand knowledge', icon: 'book', target: 'knowledge' },
+    { label: 'Brand Knowledge', icon: 'book', target: 'knowledge' },
+    { label: 'New Review', icon: 'plus', target: 'review' },
+    { label: 'Review Library', icon: 'layers', target: 'library' },
     { label: 'Insights', icon: 'chart', target: 'insights' },
   ]
   return (
@@ -130,7 +132,7 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
         <span>Inkloom AI</span>
       </div>
       <div className="workspace">
-        <span className="eyebrow">WORKSPACE</span>
+        <span className="eyebrow">Workspace</span>
         <div>
           Your workspace <Icon name="chevron" />
         </div>
@@ -149,51 +151,31 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
           </button>
         ))}
       </nav>
-      <div className="sidebar-bottom">
-        <span className="nav-item unavailable">
-          <Icon name="settings" />
-          Settings <span className="sr-only">(coming soon)</span>
-        </span>
-        <div className="profile">
-          <span className="avatar">
-            <Icon name="user" />
-          </span>
-          <span>Guest</span>
-          <Icon name="chevron" />
-        </div>
-      </div>
     </aside>
   )
 }
 
-function Header({ page, hasActiveReview }: { page: Page; hasActiveReview: boolean }) {
+function Header({ page, hasActiveReview, onSearch }: { page: Page; hasActiveReview: boolean; onSearch: () => void }) {
   return (
     <header className="topbar">
       <div className="eyebrow">
-        WORKSPACE <span>/</span>{' '}
+        Workspace <span>/</span>{' '}
         {page === 'dashboard'
-          ? 'OVERVIEW'
+          ? 'Overview'
           : page === 'library'
-          ? 'REVIEW LIBRARY'
+          ? 'Review Library'
           : page === 'knowledge'
-          ? 'BRAND KNOWLEDGE'
+          ? 'Brand Knowledge'
           : page === 'insights'
-          ? 'INSIGHTS'
+          ? 'Insights'
           : hasActiveReview
-          ? 'REVIEW WORKSPACE'
-          : 'NEW REVIEW'}
+          ? 'Review Workspace'
+          : 'New Review'}
       </div>
       <div className="top-actions">
-        <span className="demo-badge">DEMO DATA</span>
-        <span className="top-divider" />
-        <span className="header-icon" title="Search coming soon">
+        <button type="button" className="header-icon search-trigger" onClick={onSearch} aria-label="Search workspace" aria-keyshortcuts="Control+K Meta+K">
           <Icon name="search" />
-          <span className="sr-only">Search coming soon</span>
-        </span>
-        <span className="header-icon notification" title="Notifications coming soon">
-          <Icon name="bell" />
-          <span className="sr-only">Notifications coming soon</span>
-        </span>
+        </button>
       </div>
     </header>
   )
@@ -217,7 +199,7 @@ function Hero({ onStart, onLibrary }: { onStart: () => void; onLibrary: () => vo
             Open review library
           </button>
         </div>
-        <div className="eyebrow formats">TEXT · IMAGES · PDF</div>
+        <div className="eyebrow formats">Text · Images · PDF</div>
       </div>
       <img
         className="hero-art"
@@ -253,88 +235,29 @@ function StatusSummary({ submissions }: { submissions: SubmissionSummary[] }) {
   )
 }
 
-function RecentReviews({
-  submissions,
-  loading,
-  onLibrary,
-  onOpen,
-}: {
-  submissions: SubmissionSummary[]
-  loading?: boolean
-  onLibrary: () => void
-  onOpen: (id: string) => void
-}) {
-  return (
-    <section className="panel desk">
-      <div className="desk-heading">
-        <h2>On your desk</h2>
-        <button className="reviews-link" onClick={onLibrary}>
-          View all reviews <Icon name="arrow" />
-        </button>
-      </div>
-      {loading ? (
-        <p>Loading submissions...</p>
-      ) : submissions.length ? (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Draft</th>
-                <th>Format</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {submissions.slice(0, 3).map(sub => (
-                <tr key={sub.id}>
-                  <td>
-                    <button className="record-open" onClick={() => onOpen(sub.id)}>
-                      {sub.title || `Review #${sub.id.slice(0, 8)}`}
-                    </button>
-                  </td>
-                  <td>{sub.content_type.toUpperCase()}</td>
-                  <td>
-                    <span
-                      className={`status ${
-                        sub.status === 'approved'
-                          ? 'sage'
-                          : sub.status === 'draft'
-                          ? 'amber'
-                          : 'lavender'
-                      }`}
-                    >
-                      {sub.status.replace('_', ' ')}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p>No saved reviews yet. Start a review to add one.</p>
-      )}
-    </section>
-  )
-}
-
 function App() {
   const [submissions, setSubmissions] = useState<SubmissionSummary[]>([])
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<Page>('dashboard')
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setSearchOpen(true) }
+    }
+    window.addEventListener('keydown', shortcut)
+    return () => window.removeEventListener('keydown', shortcut)
+  }, [])
 
   const fetchSubmissions = useCallback(async () => {
-    setLoading(true)
     try {
       const list = await serverApi.list()
       setSubmissions(list)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect to backend server')
-    } finally {
-      setLoading(false)
     }
   }, [])
 
@@ -343,6 +266,7 @@ function App() {
   }, [fetchSubmissions])
 
   function navigate(next: Page) {
+    if (next === 'knowledge') setSelectedDocument(null)
     if (next === 'review') {
       setActiveId(null)
     }
@@ -361,14 +285,14 @@ function App() {
     <div className="app" id="dashboard">
       <Sidebar page={page} onNavigate={navigate} />
       <main className="main">
-        <Header page={page} hasActiveReview={Boolean(activeId)} />
+        <Header page={page} hasActiveReview={Boolean(activeId)} onSearch={() => setSearchOpen(true)} />
         {error && (
           <div className="storage-error" role="alert" style={{ margin: '16px 25px 0' }}>
             {error}
           </div>
         )}
         {page === 'knowledge' ? (
-          <BrandKnowledge />
+          <BrandKnowledge key={selectedDocument || 'all'} initialSelectedId={selectedDocument} />
         ) : page === 'insights' ? (
           <Insights />
         ) : page === 'library' ? (
@@ -407,17 +331,11 @@ function App() {
           <>
             <Hero onStart={() => navigate('review')} onLibrary={() => navigate('library')} />
             <StatusSummary submissions={submissions} />
-            <div className="dashboard-grid">
-              <RecentReviews
-                submissions={submissions}
-                loading={loading}
-                onLibrary={() => navigate('library')}
-                onOpen={open}
-              />
-            </div>
+            <div className="dashboard-grid"><ReviewWorkflow /></div>
           </>
         )}
       </main>
+      {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} onReview={id => { setSearchOpen(false); open(id) }} onDocument={id => { setSearchOpen(false); setSelectedDocument(id); setPage('knowledge') }} />}
     </div>
   )
 }

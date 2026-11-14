@@ -276,7 +276,7 @@ export default function ReviewWorkspace({
     <div className="review-workspace">
       <header className="workspace-intro">
         <div>
-          <span className="workspace-kicker">COMPLIANCE REVIEW WORKSPACE</span>
+          <span className="workspace-kicker">Review workspace</span>
           <h1>{sub.title || 'Untitled submission'}</h1>
           <p>
             Format: <strong>{sub.content_type.toUpperCase()}</strong> · Status:{' '}
@@ -440,6 +440,7 @@ export default function ReviewWorkspace({
       <div className="workspace-footer">
         <div>
           <span>Workflow governance status: <strong>{sub.status.replace('_', ' ').toUpperCase()}</strong></span>
+          {(sub.status === 'manager_review' || sub.status === 'final_approval') && <p>Reviewer roles are simulated; no sign-in is provided.</p>}
         </div>
 
         <div className="workspace-actions">
