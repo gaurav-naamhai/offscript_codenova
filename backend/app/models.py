@@ -1,6 +1,6 @@
 """Data models and schemas for the compliance review backend."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
@@ -23,6 +23,10 @@ class ContentPayload:
     file_name: Optional[str] = None
     file_mime: Optional[str] = None
     file_bytes: Optional[bytes] = None
+    org_id: Optional[str] = None
+    brand_name: Optional[str] = None
+    extracted_text: Optional[str] = None
+    extracted_pages: Optional[List[dict]] = field(default=None)
 
 
 class GuidelineRef(BaseModel):
@@ -36,6 +40,11 @@ class GuidelineRef(BaseModel):
     page_number: Optional[int] = None
     similarity: Optional[float] = None
     exact_violated_passage: Optional[str] = None
+    org_id: Optional[str] = None
+    category: Optional[str] = None
+    match_type: Optional[str] = None
+    matched_terms: List[str] = Field(default_factory=list)
+    version: Optional[str] = None
 
 
 class ExternalSource(BaseModel):
@@ -274,6 +283,14 @@ class Submission(BaseModel):
     role: str
     status: SubmissionStateType = "draft"
     version: int = 1
+    org_id: str = "inkloom"
+    brand_name: Optional[str] = None
+    created_by_user_id: Optional[str] = None
+    created_by_name: Optional[str] = None
+    manager_approved_by: Optional[str] = None
+    processing_stage: Optional[str] = None
+    processing_error: Optional[str] = None
+    extracted_text: Optional[str] = None
     title: Optional[str] = None
     audience: Optional[str] = None
     channel: Optional[str] = None
@@ -287,11 +304,42 @@ class Submission(BaseModel):
     updated_at: str
 
 
+class VersionSnapshot(BaseModel):
+    version: int
+    content_type: str
+    title: Optional[str] = None
+    audience: Optional[str] = None
+    channel: Optional[str] = None
+    context: Optional[str] = None
+    text: Optional[str] = None
+    file_name: Optional[str] = None
+    file_mime: Optional[str] = None
+    file_size: Optional[int] = None
+    file_bytes: Optional[bytes] = Field(default=None, exclude=True)
+    status: str = "draft"
+    created_at: str
+    created_by: Optional[str] = None
+
+
+class RecurringHint(BaseModel):
+    topic: str
+    count: int
+    line_number: Optional[int] = None
+    passage: Optional[str] = None
+    guideline_reference: Optional[str] = None
+    message: str
+    severity: Literal["low", "medium", "high"] = "medium"
+
+
 class SubmissionListItem(BaseModel):
     id: str
     content_type: str
     status: str
     version: int
+    org_id: str = "inkloom"
+    brand_name: Optional[str] = None
+    created_by_name: Optional[str] = None
+    processing_stage: Optional[str] = None
     title: Optional[str] = None
     audience: Optional[str] = None
     channel: Optional[str] = None
@@ -305,6 +353,11 @@ class VersionInfo(BaseModel):
     version: int
     flag_count: int
     needs_human_count: int
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    content_preview: Optional[str] = None
+    decision_count: int = 0
+    file_name: Optional[str] = None
 
 
 class Decision(BaseModel):
@@ -313,6 +366,10 @@ class Decision(BaseModel):
     role: str
     decision: DecisionAction
     comment: Optional[str] = None
+    override_unresolved: bool = False
+    override_reason: Optional[str] = None
+    actor_user_id: Optional[str] = None
+    actor_name: Optional[str] = None
     version: int
     created_at: str
 
@@ -323,6 +380,7 @@ class Comment(BaseModel):
     role: str
     text: str
     version: int
+    actor_name: Optional[str] = None
     created_at: str
 
 
@@ -341,17 +399,20 @@ class AuditEvent(BaseModel):
 
 
 class CheckRequest(BaseModel):
-    role: str
+    role: Optional[str] = None
+    async_mode: bool = False
 
 
 class DecisionRequest(BaseModel):
-    role: str
+    role: Optional[str] = None
     decision: str
     comment: Optional[str] = None
+    override_unresolved: bool = False
+    override_reason: Optional[str] = None
 
 
 class CommentRequest(BaseModel):
-    role: str
+    role: Optional[str] = None
     text: str
 
 
@@ -365,6 +426,21 @@ class RecheckRequest(BaseModel):
     role: Optional[str] = "creator"
 
 
+class DraftHintsRequest(BaseModel):
+    text: str
+
+
+class RectificationApproveRequest(BaseModel):
+    approved_wording: Optional[str] = None
+    comment: Optional[str] = None
+    role: Optional[str] = None
+
+
+class RectificationDismissRequest(BaseModel):
+    reason: Optional[str] = None
+    role: Optional[str] = None
+
+
 class RecheckResponse(BaseModel):
     new_flags: List[Flag]
     original_flag_gone: bool
@@ -375,6 +451,11 @@ class CheckResponse(BaseModel):
     submission: Submission
     flags: List[Flag]
     degraded_modules: List[DegradedModule] = Field(default_factory=list)
+    recurring_hints: List[RecurringHint] = Field(default_factory=list)
+    unresolved_blocking_count: int = 0
+    brand_score: Optional[int] = None
+    fact_score: Optional[int] = None
+    readiness_status: Optional[str] = None
 
 
 class SubmissionDetailResponse(BaseModel):
@@ -382,6 +463,23 @@ class SubmissionDetailResponse(BaseModel):
     flags: List[Flag]
     comments: List[Comment]
     decisions: List[Decision]
+    recurring_hints: List[RecurringHint] = Field(default_factory=list)
+    unresolved_blocking_count: int = 0
+    brand_score: Optional[int] = None
+    fact_score: Optional[int] = None
+    readiness_status: Optional[str] = None
+    version_snapshot: Optional[VersionSnapshot] = None
+
+
+class SubmissionStatusResponse(BaseModel):
+    id: str
+    status: str
+    version: int
+    processing_stage: Optional[str] = None
+    processing_error: Optional[str] = None
+    progress_pct: int = 0
+    flag_count: int = 0
+    updated_at: str
 
 
 class RecurringInsightsResponse(BaseModel):

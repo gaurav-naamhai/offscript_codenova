@@ -69,8 +69,15 @@ def retrieve_guidelines(content: ContentPayload) -> List[GuidelineRef]:
             file_name=content.file_name,
             file_mime=content.file_mime,
             file_bytes=content.file_bytes,
+            org_id=getattr(content, "org_id", None),
+            brand_name=getattr(content, "brand_name", None),
+            extracted_text=getattr(content, "extracted_text", None),
         )
-        results = rag_retrieve(payload)
+        results = rag_retrieve(
+            payload,
+            org_id=getattr(content, "org_id", None),
+            brand_name=getattr(content, "brand_name", None),
+        )
         return [GuidelineRef(**g.model_dump()) for g in results]
     except Exception:
         return [r["guideline"] for r in RULES]

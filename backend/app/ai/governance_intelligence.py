@@ -14,6 +14,7 @@ Operates strictly on historical flags without fabricating statistics or inventin
 from collections import Counter
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 
 from app.ai.client import GeminiClient
@@ -23,7 +24,7 @@ from app.ai.schemas import (
     RecurringViolation,
 )
 from app.config import Settings
-from app.models import Flag, FlagDraft
+from app.models import Flag, FlagDraft, RecurringHint
 from app.uncertainty import needs_human
 
 logger = logging.getLogger(__name__)
@@ -295,4 +296,183 @@ def _generate_mock_governance_insights(
         ambiguous_guidelines=ambiguous,
         summary_narrative=narrative,
     )
+
+
+def _find_line_number(full_text: Optional[str], passage: Optional[str]) -> Optional[int]:
+    if not full_text or not passage or passage == "(whole submission)":
+        return None
+    idx = full_text.lower().find(passage.strip().lower())
+    if idx < 0:
+        return None
+    return full_text[:idx].count("\n") + 1
+
+
+def compute_recurring_hints(
+    current_flags: List[Flag],
+    historical_flags: List[Flag],
+    submission_text: Optional[str] = None,
+) -> List[RecurringHint]:
+    """Identify issues in the current submission that repeat patterns across historical org reviews."""
+    if not current_flags or not historical_flags:
+        return []
+
+    topic_counts: Counter[str] = Counter()
+    guideline_counts: Counter[str] = Counter()
+    passage_counts: Counter[str] = Counter()
+
+    for hf in historical_flags:
+        if hf.state not in ("potential_issue", "contradicted", "insufficient_evidence", "unclear"):
+            continue
+        topic_counts[_cluster_issue_topic(hf.explanation or "")] += 1
+        if hf.guideline_ref and hf.guideline_ref.document:
+            guideline_counts[hf.guideline_ref.document.lower()] += 1
+        p_norm = (hf.passage or "").strip().lower()
+        if p_norm and p_norm != "(whole submission)" and len(p_norm) >= 3:
+            passage_counts[p_norm] += 1
+
+    hints: List[RecurringHint] = []
+    seen_topics: set[str] = set()
+    for cf in current_flags:
+        if cf.state not in ("potential_issue", "contradicted", "insufficient_evidence", "unclear"):
+            continue
+        topic = _cluster_issue_topic(cf.explanation or "")
+        g_doc = cf.guideline_ref.document if cf.guideline_ref else None
+        p_norm = (cf.passage or "").strip().lower()
+
+        repeat_count = max(
+            topic_counts.get(topic, 0),
+            guideline_counts.get(g_doc.lower(), 0) if g_doc else 0,
+            passage_counts.get(p_norm, 0) if p_norm else 0,
+        )
+        if repeat_count < 2 or topic in seen_topics:
+            continue
+        seen_topics.add(topic)
+
+        line_no = _find_line_number(submission_text, cf.passage)
+        line_prefix = f"at line {line_no} " if line_no is not None else ""
+        snippet = f"('{cf.passage[:50]}') " if cf.passage and cf.passage != "(whole submission)" else ""
+        rule_ref = f" ({g_doc})" if g_doc else ""
+        hints.append(
+            RecurringHint(
+                topic=topic,
+                count=repeat_count,
+                line_number=line_no,
+                passage=cf.passage,
+                guideline_reference=g_doc,
+                severity="high" if repeat_count >= 3 else "medium",
+                message=(
+                    f"Heads up — there's a recurring brand issue {line_prefix}{snippet}"
+                    f"seen {repeat_count} times across recent reviews ({topic}){rule_ref}. "
+                    "Consider modifying this phrasing before submitting for approval."
+                ),
+            )
+        )
+    return hints
+
+
+def compute_draft_hints(
+    text: str,
+    constitution: Optional[Dict[str, Any]] = None,
+    historical_flags: Optional[List[Flag]] = None,
+) -> List[RecurringHint]:
+    """Fast (<20ms) pre-flight hints as the creator types, matching Brand Constitution & repeat violations."""
+    clean = (text or "").strip()
+    if not clean:
+        return []
+
+    hints: List[RecurringHint] = []
+    seen: set[str] = set()
+    low = clean.lower()
+
+    # 1. Check active Brand Constitution forbidden terms
+    forbidden = (constitution or {}).get("forbidden_terms") or []
+    for term in forbidden:
+        t_clean = str(term).strip()
+        if len(t_clean) < 3:
+            continue
+        if re.search(r"\b" + re.escape(t_clean.lower()) + r"\b", low):
+            line_no = _find_line_number(clean, t_clean)
+            key = f"term:{t_clean.lower()}"
+            if key not in seen:
+                seen.add(key)
+                hints.append(
+                    RecurringHint(
+                        topic="Prohibited Brand Terminology",
+                        count=1,
+                        line_number=line_no,
+                        passage=t_clean,
+                        guideline_reference=(constitution or {}).get("title") or "Brand Constitution",
+                        severity="high",
+                        message=(
+                            f"Line {line_no or 1}: '{t_clean}' is listed as a prohibited term in your Brand Constitution. "
+                            "Consider replacing it before submitting."
+                        ),
+                    )
+                )
+
+    # 2. Check historically repeated passages in the org's prior flags
+    passage_counts: Counter[str] = Counter()
+    passage_example_rule: Dict[str, str] = {}
+    for hf in historical_flags or []:
+        if hf.state in ("potential_issue", "contradicted"):
+            p = (hf.passage or "").strip()
+            if 3 <= len(p) <= 80 and p.lower() != "(whole submission)":
+                passage_counts[p.lower()] += 1
+                if hf.guideline_ref:
+                    passage_example_rule[p.lower()] = hf.guideline_ref.document
+
+    for p_low, cnt in passage_counts.most_common(12):
+        if cnt >= 2 and p_low in low and f"term:{p_low}" not in seen:
+            seen.add(f"term:{p_low}")
+            line_no = _find_line_number(clean, p_low)
+            hints.append(
+                RecurringHint(
+                    topic="Repeated Past Mistake",
+                    count=cnt,
+                    line_number=line_no,
+                    passage=p_low,
+                    guideline_reference=passage_example_rule.get(p_low),
+                    severity="medium",
+                    message=(
+                        f"Heads up — line {line_no or 1} uses '{p_low}', which was flagged {cnt} times "
+                        "in previous reviews. You may want to rephrase it now."
+                    ),
+                )
+            )
+
+    return hints[:6]
+
+
+def compute_fidelity_scores(flags: List[Flag]) -> tuple[int, int, str]:
+    """Compute (brand_score, fact_score, readiness_status) from submission flags."""
+    brand_flags = [f for f in flags if f.finding_type == "brand"]
+    claim_flags = [f for f in flags if f.finding_type == "claim"]
+
+    def _score_group(items: List[Flag]) -> int:
+        if not items:
+            return 100
+        deduction = 0
+        for f in items:
+            if f.status in ("accepted", "dismissed", "resolved"):
+                continue
+            if f.origin == "error":
+                deduction += 55
+            elif f.state in ("contradicted", "potential_issue"):
+                deduction += 45
+            elif f.state in ("insufficient_evidence", "unclear"):
+                deduction += 25
+        return max(10, 100 - deduction)
+
+    brand_score = _score_group(brand_flags)
+    fact_score = _score_group(claim_flags)
+
+    has_error = any(f.origin == "error" and f.status == "open" for f in flags)
+    has_blocking = any(
+        f.status == "open"
+        and f.state in ("potential_issue", "contradicted", "insufficient_evidence", "unclear")
+        for f in flags
+    )
+    readiness = "blocked_error" if has_error else ("needs_resolution" if has_blocking else "ready")
+    return brand_score, fact_score, readiness
+
 

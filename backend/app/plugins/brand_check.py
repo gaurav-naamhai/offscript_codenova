@@ -21,7 +21,8 @@ from app.ai.brand_verification import (
 )
 from app.ai.client import GeminiClient
 from app.ai.content_understanding import understand_content
-from app.ai.suggestions_corrections import generate_correction
+from app.ai.schemas import ContentUnderstandingOutput
+from app.ai.suggestions_corrections import generate_correction, validate_no_invented_facts
 from app.ai.visual_accessibility import analyze_visual_accessibility
 from app.config import Settings
 from app.models import ContentPayload, FlagDraft, GuidelineRef
@@ -61,6 +62,7 @@ def check_brand(
     content: ContentPayload,
     guidelines: List[GuidelineRef],
     client: Optional[GeminiClient] = None,
+    content_understanding: Optional[ContentUnderstandingOutput] = None,
 ) -> List[FlagDraft]:
     """Check draft content against brand guidelines and voice principles.
 
@@ -173,7 +175,11 @@ def check_brand(
                     guideline_ref=ref,
                     guideline_refs=[ref] if ref else [],
                     uncertainty_note=visual_output.uncertainty_note,
-                    suggested_correction="Align visual elements and logo presentation with brand guidelines.",
+                    suggested_correction=(
+                        "Align visual elements and logo presentation with the cited brand guidelines."
+                        if visual_output.visual_brand_alignment == "potential_issue"
+                        else None
+                    ),
                     origin="module",
                     status="open",
                     comments=[],
@@ -182,9 +188,19 @@ def check_brand(
 
         # 2. Also run Brand Verification if file bytes are present
         if content.file_bytes:
-            brand_output = verify_brand(content, guidelines=guidelines, client=ai_client)
+            brand_output = verify_brand(
+                content,
+                guidelines=guidelines,
+                content_understanding=content_understanding,
+                client=ai_client,
+            )
+            full_txt = content.text or getattr(content, "extracted_text", None)
             for f in brand_output.findings:
-                draft = brand_finding_to_flag_draft(f, full_text=content.text)
+                if f.suggested_fix and full_txt:
+                    ok_fix, _ = validate_no_invented_facts(f.passage, f.suggested_fix, guidelines=guidelines)
+                    if not ok_fix:
+                        f.suggested_fix = None
+                draft = brand_finding_to_flag_draft(f, full_text=full_txt)
                 if not draft.guideline_ref and ref:
                     draft.guideline_ref = ref
                     draft.guideline_refs = [ref]
@@ -243,7 +259,11 @@ def check_brand(
                     guideline_ref=ref,
                     guideline_refs=[ref] if ref else [],
                     uncertainty_note=visual_output.uncertainty_note,
-                    suggested_correction="Adjust typography size and color contrast to meet WCAG 2.1 AA standards.",
+                    suggested_correction=(
+                        "Adjust typography size or contrast to align with cited brand guidelines."
+                        if visual_output.visual_brand_alignment == "potential_issue"
+                        else None
+                    ),
                     origin="module",
                     status="open",
                     comments=[],
@@ -251,9 +271,19 @@ def check_brand(
             )
 
         # 2. Run multimodal brand verification across document
-        brand_output = verify_brand(content, guidelines=guidelines, client=ai_client)
+        brand_output = verify_brand(
+            content,
+            guidelines=guidelines,
+            content_understanding=content_understanding,
+            client=ai_client,
+        )
+        full_txt = content.text or getattr(content, "extracted_text", None)
         for f in brand_output.findings:
-            draft = brand_finding_to_flag_draft(f, full_text=content.text)
+            if f.suggested_fix and full_txt:
+                ok_fix, _ = validate_no_invented_facts(f.passage, f.suggested_fix, guidelines=guidelines)
+                if not ok_fix:
+                    f.suggested_fix = None
+            draft = brand_finding_to_flag_draft(f, full_text=full_txt)
             if not draft.guideline_ref and ref:
                 draft.guideline_ref = ref
                 draft.guideline_refs = [ref]
@@ -296,8 +326,8 @@ def check_brand(
             )
         ]
 
-    # 1. Content Understanding (extract claims and preserved entities)
-    cu = understand_content(content, client=ai_client)
+    # 1. Content Understanding (reuse pre-computed if supplied)
+    cu = content_understanding or understand_content(content, client=ai_client)
 
     # 2. Brand Verification against retrieved guidelines
     brand_output = verify_brand(
@@ -307,17 +337,26 @@ def check_brand(
         client=ai_client,
     )
 
-    # 3. Generate entity-preserving corrections for actionable issues
+    # 3. Generate entity-preserving, anti-fabricated corrections for actionable issues
     for finding in brand_output.findings:
-        if finding.state == "potential_issue" and not finding.suggested_fix:
-            corr = generate_correction(
-                flag=finding,
-                content_understanding=cu,
-                guidelines=guidelines,
-                client=ai_client,
-            )
-            if corr and corr.suggested_replacement and corr.suggested_replacement != finding.passage:
-                finding.suggested_fix = corr.suggested_replacement
+        if finding.state == "aligned":
+            finding.suggested_fix = None
+        elif finding.state == "potential_issue":
+            if finding.suggested_fix:
+                ok_fix, _ = validate_no_invented_facts(
+                    finding.passage, finding.suggested_fix, guidelines=guidelines
+                )
+                if not ok_fix:
+                    finding.suggested_fix = None
+            if not finding.suggested_fix:
+                corr = generate_correction(
+                    flag=finding,
+                    content_understanding=cu,
+                    guidelines=guidelines,
+                    client=ai_client,
+                )
+                if corr and corr.recheck_passed and corr.suggested_replacement and corr.suggested_replacement != finding.passage:
+                    finding.suggested_fix = corr.suggested_replacement
 
         draft = brand_finding_to_flag_draft(finding, full_text=content.text)
         if not draft.guideline_ref and ref:

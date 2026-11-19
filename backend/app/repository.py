@@ -1,10 +1,11 @@
-"""Repository pattern for submissions, flags, decisions, comments, and audit events."""
+"""Repository pattern for submissions, version snapshots, flags, decisions, comments, audit events, and guideline rectifications."""
 
 from abc import ABC, abstractmethod
 import threading
 from typing import Dict, List, Optional
 
-from app.models import AuditEvent, Comment, Decision, Flag, Submission
+from app.ai.guideline_rectification import GuidelineRectification
+from app.models import AuditEvent, Comment, Decision, Flag, Submission, VersionSnapshot
 
 MAX_SUBMISSIONS = 40
 
@@ -17,7 +18,9 @@ class SubmissionRepository(ABC):
     @abstractmethod
     async def get_submission(self, submission_id: str) -> Optional[Submission]: ...
     @abstractmethod
-    async def list_submissions(self, status: Optional[str] = None) -> List[Submission]: ...
+    async def list_submissions(
+        self, status: Optional[str] = None, org_id: Optional[str] = None
+    ) -> List[Submission]: ...
     @abstractmethod
     async def update_submission(self, submission: Submission) -> Submission: ...
     @abstractmethod
@@ -25,11 +28,19 @@ class SubmissionRepository(ABC):
     @abstractmethod
     async def get_flags(self, submission_id: str, version: Optional[int] = None) -> List[Flag]: ...
     @abstractmethod
-    async def get_all_flags(self, submission_id: Optional[str] = None) -> List[Flag]: ...
+    async def get_all_flags(
+        self, submission_id: Optional[str] = None, org_id: Optional[str] = None
+    ) -> List[Flag]: ...
     @abstractmethod
     async def update_flag(self, submission_id: str, flag: Flag) -> Flag: ...
     @abstractmethod
     async def get_versions(self, submission_id: str) -> List[int]: ...
+    @abstractmethod
+    async def save_version_snapshot(self, submission_id: str, snapshot: VersionSnapshot) -> VersionSnapshot: ...
+    @abstractmethod
+    async def get_version_snapshot(self, submission_id: str, version: int) -> Optional[VersionSnapshot]: ...
+    @abstractmethod
+    async def list_version_snapshots(self, submission_id: str) -> List[VersionSnapshot]: ...
     @abstractmethod
     async def add_decision(self, decision: Decision) -> Decision: ...
     @abstractmethod
@@ -43,6 +54,19 @@ class SubmissionRepository(ABC):
     @abstractmethod
     async def get_audit_events(self, submission_id: str) -> List[AuditEvent]: ...
 
+    # Guideline Rectification persistence (optional default in-memory / concrete override)
+    async def save_rectifications(self, org_id: str, items: List[GuidelineRectification]) -> List[GuidelineRectification]:
+        return items
+
+    async def list_rectifications(self, org_id: str) -> List[GuidelineRectification]:
+        return []
+
+    async def get_rectification(self, org_id: str, rect_id: str) -> Optional[GuidelineRectification]:
+        return None
+
+    async def update_rectification(self, item: GuidelineRectification) -> GuidelineRectification:
+        return item
+
 
 class InMemorySubmissionRepository(SubmissionRepository):
     """Thread-safe in-memory repository implementation with max submission capacity."""
@@ -51,19 +75,29 @@ class InMemorySubmissionRepository(SubmissionRepository):
         self._lock = threading.Lock()
         self._max = max_submissions
         self._submissions: Dict[str, Submission] = {}
+        self._snapshots: Dict[str, Dict[int, VersionSnapshot]] = {}
         self._flags: Dict[str, Dict[int, List[Flag]]] = {}
         self._decisions: Dict[str, List[Decision]] = {}
         self._comments: Dict[str, List[Comment]] = {}
         self._audit_events: Dict[str, List[AuditEvent]] = {}
+        self._rectifications: Dict[str, List[GuidelineRectification]] = {}
 
     async def create_submission(self, submission: Submission) -> Submission:
         with self._lock:
             while len(self._submissions) >= self._max:
                 oldest_id = min(self._submissions, key=lambda k: self._submissions[k].created_at)
-                for d in (self._submissions, self._flags, self._decisions, self._comments, self._audit_events):
+                for d in (
+                    self._submissions,
+                    self._snapshots,
+                    self._flags,
+                    self._decisions,
+                    self._comments,
+                    self._audit_events,
+                ):
                     d.pop(oldest_id, None)
 
             self._submissions[submission.id] = submission
+            self._snapshots[submission.id] = {}
             self._flags[submission.id] = {submission.version: []}
             self._decisions[submission.id] = []
             self._comments[submission.id] = []
@@ -74,9 +108,14 @@ class InMemorySubmissionRepository(SubmissionRepository):
         with self._lock:
             return self._submissions.get(submission_id)
 
-    async def list_submissions(self, status: Optional[str] = None) -> List[Submission]:
+    async def list_submissions(
+        self, status: Optional[str] = None, org_id: Optional[str] = None
+    ) -> List[Submission]:
         with self._lock:
             items = list(reversed(list(self._submissions.values())))
+            if org_id:
+                norm_org = org_id.strip().lower()
+                items = [s for s in items if (s.org_id or "inkloom").lower() == norm_org]
             if status:
                 items = [s for s in items if s.status == status]
             return sorted(items, key=lambda s: s.created_at, reverse=True)
@@ -113,11 +152,27 @@ class InMemorySubmissionRepository(SubmissionRepository):
                 return list(sub_flags[sub.version])
             return list(sub_flags[max(sub_flags.keys())]) if sub_flags else []
 
-    async def get_all_flags(self, submission_id: Optional[str] = None) -> List[Flag]:
+    async def get_all_flags(
+        self, submission_id: Optional[str] = None, org_id: Optional[str] = None
+    ) -> List[Flag]:
         with self._lock:
             if submission_id:
                 sub_flags = self._flags.get(submission_id, {})
                 return [f for v in sub_flags.values() for f in v]
+            if org_id:
+                norm_org = org_id.strip().lower()
+                allowed_ids = {
+                    sid
+                    for sid, sub in self._submissions.items()
+                    if (sub.org_id or "inkloom").lower() == norm_org
+                }
+                return [
+                    f
+                    for sid, sf in self._flags.items()
+                    if sid in allowed_ids
+                    for v in sf.values()
+                    for f in v
+                ]
             return [f for sf in self._flags.values() for v in sf.values() for f in v]
 
     async def update_flag(self, submission_id: str, flag: Flag) -> Flag:
@@ -133,9 +188,24 @@ class InMemorySubmissionRepository(SubmissionRepository):
         with self._lock:
             sub = self._submissions.get(submission_id)
             versions = set(self._flags.get(submission_id, {}).keys())
+            versions.update(self._snapshots.get(submission_id, {}).keys())
             if sub:
                 versions.update(range(1, sub.version + 1))
             return sorted(versions) if versions else [1]
+
+    async def save_version_snapshot(self, submission_id: str, snapshot: VersionSnapshot) -> VersionSnapshot:
+        with self._lock:
+            self._snapshots.setdefault(submission_id, {})[snapshot.version] = snapshot
+            return snapshot
+
+    async def get_version_snapshot(self, submission_id: str, version: int) -> Optional[VersionSnapshot]:
+        with self._lock:
+            return self._snapshots.get(submission_id, {}).get(version)
+
+    async def list_version_snapshots(self, submission_id: str) -> List[VersionSnapshot]:
+        with self._lock:
+            snaps = self._snapshots.get(submission_id, {})
+            return [snaps[k] for k in sorted(snaps.keys())]
 
     async def add_decision(self, decision: Decision) -> Decision:
         with self._lock:
@@ -164,6 +234,38 @@ class InMemorySubmissionRepository(SubmissionRepository):
         with self._lock:
             return list(self._audit_events.get(submission_id, []))
 
+    async def save_rectifications(self, org_id: str, items: List[GuidelineRectification]) -> List[GuidelineRectification]:
+        norm_org = (org_id or "inkloom").strip().lower()
+        with self._lock:
+            existing = self._rectifications.get(norm_org, [])
+            # Preserve previously approved/dismissed resolutions; refresh pending ones
+            resolved = [r for r in existing if r.status != "pending"]
+            resolved_keys = {(r.issue_type, r.chunk_id) for r in resolved}
+            merged = resolved + [it for it in items if (it.issue_type, it.chunk_id) not in resolved_keys]
+            self._rectifications[norm_org] = merged
+            return list(merged)
+
+    async def list_rectifications(self, org_id: str) -> List[GuidelineRectification]:
+        norm_org = (org_id or "inkloom").strip().lower()
+        with self._lock:
+            return list(self._rectifications.get(norm_org, []))
+
+    async def get_rectification(self, org_id: str, rect_id: str) -> Optional[GuidelineRectification]:
+        norm_org = (org_id or "inkloom").strip().lower()
+        with self._lock:
+            return next((r for r in self._rectifications.get(norm_org, []) if r.id == rect_id), None)
+
+    async def update_rectification(self, item: GuidelineRectification) -> GuidelineRectification:
+        norm_org = (item.org_id or "inkloom").strip().lower()
+        with self._lock:
+            arr = self._rectifications.setdefault(norm_org, [])
+            for idx, existing in enumerate(arr):
+                if existing.id == item.id:
+                    arr[idx] = item
+                    return item
+            arr.append(item)
+            return item
+
 
 class SupabaseRepository(SubmissionRepository):
     """Supabase storage placeholder."""
@@ -173,13 +275,16 @@ class SupabaseRepository(SubmissionRepository):
 
     async def create_submission(self, submission: Submission) -> Submission: raise NotImplementedError
     async def get_submission(self, submission_id: str) -> Optional[Submission]: raise NotImplementedError
-    async def list_submissions(self, status: Optional[str] = None) -> List[Submission]: raise NotImplementedError
+    async def list_submissions(self, status: Optional[str] = None, org_id: Optional[str] = None) -> List[Submission]: raise NotImplementedError
     async def update_submission(self, submission: Submission) -> Submission: raise NotImplementedError
     async def set_flags(self, submission_id: str, flags: List[Flag], version: Optional[int] = None) -> List[Flag]: raise NotImplementedError
     async def get_flags(self, submission_id: str, version: Optional[int] = None) -> List[Flag]: raise NotImplementedError
-    async def get_all_flags(self, submission_id: Optional[str] = None) -> List[Flag]: raise NotImplementedError
+    async def get_all_flags(self, submission_id: Optional[str] = None, org_id: Optional[str] = None) -> List[Flag]: raise NotImplementedError
     async def update_flag(self, submission_id: str, flag: Flag) -> Flag: raise NotImplementedError
     async def get_versions(self, submission_id: str) -> List[int]: raise NotImplementedError
+    async def save_version_snapshot(self, submission_id: str, snapshot: VersionSnapshot) -> VersionSnapshot: raise NotImplementedError
+    async def get_version_snapshot(self, submission_id: str, version: int) -> Optional[VersionSnapshot]: raise NotImplementedError
+    async def list_version_snapshots(self, submission_id: str) -> List[VersionSnapshot]: raise NotImplementedError
     async def add_decision(self, decision: Decision) -> Decision: raise NotImplementedError
     async def get_decisions(self, submission_id: str) -> List[Decision]: raise NotImplementedError
     async def add_comment(self, comment: Comment) -> Comment: raise NotImplementedError

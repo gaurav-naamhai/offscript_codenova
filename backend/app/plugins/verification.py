@@ -6,9 +6,9 @@ with automatic fallback to offline fixture rules when credentials are unavailabl
 """
 
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from app.models import ContentPayload, ExternalSource, FlagDraft
+from app.models import ContentPayload, ExternalSource, FlagDraft, GuidelineRef
 
 RULES = [
     {
@@ -104,33 +104,66 @@ def _fallback_verify(content: ContentPayload) -> List[FlagDraft]:
 def verify_claims(
     content: ContentPayload,
     client: Optional[object] = None,
+    guidelines: Optional[List[GuidelineRef]] = None,
+    content_understanding: Optional[Any] = None,
 ) -> List[FlagDraft]:
-    """Verify factual claims against external sources.
+    """Verify factual claims against approved brand facts first, then external sources.
 
     In AI mode (MOCK_AI=true or GEMINI_API_KEY present):
     Executes Sera's Claim Verification (app.ai.claim_verification) with evidence
     retrieved via Ken's external search (retrieval.external_search).
 
-    In offline fixture mode:
+    In offline fixture mode (no credentials and MOCK_AI=false):
     Falls back to deterministic regex RULES with origin='fixture'.
     """
-    try:
-        from app.config import Settings
-        settings = Settings()
-        use_ai = (client is not None) or settings.mock_ai or bool(settings.gemini_api_key)
+    from app.config import Settings
 
-        if use_ai:
-            from app.ai.claim_verification import (
-                claim_finding_to_flag_draft,
-                verify_claims as ai_verify_claims,
+    settings = Settings()
+    use_ai = (client is not None) or settings.mock_ai or bool(settings.gemini_api_key)
+
+    if use_ai:
+        from app.ai.claim_verification import (
+            claim_finding_to_flag_draft,
+            verify_claims as ai_verify_claims,
+        )
+        from app.ai.suggestions_corrections import validate_no_invented_facts
+
+        target_input = content_understanding if content_understanding is not None else content
+        claim_output = ai_verify_claims(
+            target_input,
+            client=client,  # type: ignore[arg-type]
+            guidelines=guidelines,
+            brand_name=getattr(content, "brand_name", None),
+        )
+        full_txt = content.text or getattr(content, "extracted_text", None)
+        flags: List[FlagDraft] = []
+        for f in claim_output.findings:
+            if f.suggested_fix:
+                ok_fix, _ = validate_no_invented_facts(
+                    f.passage, f.suggested_fix, guidelines=guidelines
+                )
+                if not ok_fix:
+                    f.suggested_fix = None
+            flags.append(claim_finding_to_flag_draft(f, full_text=full_txt))
+        if flags:
+            return flags
+        # When AI ran cleanly and found zero factual claims requiring flags, return supported notice
+        sample = (full_txt or content.file_name or "Submitted draft")[:80].strip()
+        return [
+            FlagDraft(
+                finding_type="claim",
+                state="supported",
+                passage=sample,
+                location="content",
+                explanation="No unsubstantiated factual or statistical claims requiring external verification were detected.",
+                why_it_matters="Ensures published statements do not make unsupported external assertions.",
+                origin="module",
             )
-            # Route through Sera's claim verification using Ken's external search
-            claim_output = ai_verify_claims(content, client=client)  # type: ignore[arg-type]
-            flags = [claim_finding_to_flag_draft(f, full_text=content.text) for f in claim_output.findings]
-            if flags:
-                return flags
+        ]
 
+    try:
         from retrieval.config import EXA_API_KEY, GEMINI_API_KEY, TINYFISH_API_KEY
+
         if not (GEMINI_API_KEY and (EXA_API_KEY or TINYFISH_API_KEY)):
             return _fallback_verify(content)
 
@@ -143,8 +176,11 @@ def verify_claims(
             file_name=content.file_name,
             file_mime=content.file_mime,
             file_bytes=content.file_bytes,
+            org_id=getattr(content, "org_id", None),
+            brand_name=getattr(content, "brand_name", None),
+            extracted_text=getattr(content, "extracted_text", None),
         )
-        results = live_verify(payload)
+        results = live_verify(payload, brand_name=getattr(content, "brand_name", None))
         return [FlagDraft(**f.model_dump()) for f in results]
     except Exception:
         return _fallback_verify(content)

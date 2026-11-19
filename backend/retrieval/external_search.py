@@ -1,15 +1,17 @@
-"""Live external claim search, page retrieval, freshness, and error handling.
+"""Live external claim search, page retrieval, relevance/entity filtering, freshness, and error handling.
 
 Uses:
 - TinyFish (`TinySearch` + `TinyFetch`) and Exa Search for live web discovery and page extraction.
-- Gemini (`gemini-3.5-flash-lite`) to extract verifiable factual claims from a draft and evaluate
-  whether retrieved external evidence supports, contradicts, or provides insufficient evidence.
+- Gemini (with automatic fallback to `gemini-2.5-flash` / `gemini-2.0-flash`) to extract verifiable
+  factual claims and evaluate whether retrieved external evidence supports, contradicts, or provides
+  insufficient evidence — rejecting unrelated-company websites.
 """
 
 from datetime import datetime, timezone
 import json
 import logging
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 import httpx
 from google.genai import types
@@ -33,7 +35,15 @@ from retrieval.schemas import (
 
 logger = logging.getLogger(__name__)
 
-HTTP_TIMEOUT = 12.0
+HTTP_TIMEOUT = 8.0
+FALLBACK_GEN_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash")
+
+_GENERIC_TITLE_WORDS: Set[str] = {
+    "the", "and", "for", "with", "home", "about", "official", "website", "blog",
+    "news", "guide", "review", "report", "study", "wiki", "wikipedia", "inc",
+    "corp", "llc", "ltd", "co", "com", "org", "net", "page", "index", "search",
+    "best", "top", "new", "how", "why", "what", "when", "global", "market",
+}
 
 
 def _extract_domain(url: str) -> str:
@@ -41,6 +51,122 @@ def _extract_domain(url: str) -> str:
         return urlparse(url).netloc.lower().removeprefix("www.")
     except Exception:
         return ""
+
+
+def _tokenize_alnum(text: str) -> Set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if t not in _GENERIC_TITLE_WORDS}
+
+
+def filter_relevant_external_evidence(
+    items: List[ExternalEvidenceItem],
+    claim_text: str,
+    brand_name: Optional[str] = None,
+    org_domain: Optional[str] = None,
+) -> List[ExternalEvidenceItem]:
+    """Filter retrieved web results to reject unrelated-company sites and off-topic pages.
+
+    Marks rejected items as `status="unavailable"`, `entity_matched=False`, and `rejected_reason`.
+    """
+    if not items:
+        return []
+
+    claim_tokens = _tokenize_alnum(claim_text)
+    brand_clean = (brand_name or "").strip().lower()
+    brand_tokens = _tokenize_alnum(brand_clean)
+
+    # Detect whether the claim specifically refers to the active brand or first-person brand ("we", "our")
+    claim_low = (claim_text or "").lower()
+    is_brand_specific = bool(
+        brand_clean and (
+            brand_clean in claim_low
+            or any(bt in claim_tokens for bt in brand_tokens)
+            or re.search(r"\b(we|our|us)\b", claim_low)
+        )
+    )
+
+    filtered: List[ExternalEvidenceItem] = []
+    for item in items:
+        if item.status == "unavailable" or not (item.excerpt or "").strip():
+            filtered.append(item)
+            continue
+
+        title_str = item.title or ""
+        domain_str = item.domain or _extract_domain(item.url)
+        excerpt_str = item.excerpt or ""
+        combined = f"{title_str} {domain_str} {excerpt_str}".lower()
+        combined_tokens = _tokenize_alnum(combined)
+
+        # Compute lexical relevance between claim and page
+        overlap = claim_tokens.intersection(combined_tokens)
+        rel_score = round(len(overlap) / max(1, min(len(claim_tokens), 8)), 3) if claim_tokens else 0.5
+        item.relevance_score = min(1.0, rel_score)
+
+        # Unrelated company check when claim is about the active brand
+        if is_brand_specific and brand_tokens:
+            brand_present = brand_clean in combined or any(bt in combined_tokens for bt in brand_tokens)
+            same_org_domain = bool(org_domain and org_domain.lower() in domain_str.lower())
+            # Heuristic: if page title/domain prominently names another proper-noun brand and never mentions our brand, reject!
+            title_caps = {
+                w.lower()
+                for w in re.findall(r"\b[A-Z][a-zA-Z0-9]{2,}\b", title_str)
+                if w.lower() not in _GENERIC_TITLE_WORDS and w.lower() not in claim_tokens
+            }
+            domain_root = domain_str.split(".")[0] if domain_str else ""
+            is_authoritative_neutral = any(
+                d in domain_str for d in ("gov", "edu", "wikipedia.org", "reuters.com", "bbc.", "who.int", "iso.org", "nist.gov", "ftc.gov")
+            )
+            if not brand_present and not same_org_domain and not is_authoritative_neutral:
+                # If title/domain appears to be another company's site (e.g., BrightLeaf vs BrightLeaf Solar / another brand)
+                if title_caps or (domain_root and domain_root not in brand_tokens and domain_root not in claim_tokens):
+                    item.entity_matched = False
+                    item.status = "unavailable"
+                    item.rejected_reason = (
+                        f"unrelated_company_source: Source '{domain_str or title_str}' does not reference '{brand_name}'."
+                    )
+                    filtered.append(item)
+                    continue
+
+        # Drop completely off-topic pages with almost zero keyword overlap
+        if claim_tokens and rel_score < 0.12 and not (brand_clean and brand_clean in combined):
+            item.entity_matched = False
+            item.status = "unavailable"
+            item.rejected_reason = "low_relevance_to_claim"
+
+        filtered.append(item)
+
+    return filtered
+
+
+def _generate_with_model_fallback(
+    client: Any,
+    contents: Any,
+    response_mime_type: str = "application/json",
+    temperature: float = 0.1,
+) -> Any:
+    """Call Gemini with automatic fallback if configured model returns 404."""
+    models = [GEMINI_MODEL] + [m for m in FALLBACK_GEN_MODELS if m != GEMINI_MODEL]
+    last_exc: Optional[Exception] = None
+    for idx, model_name in enumerate(models):
+        try:
+            return client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type=response_mime_type,
+                    temperature=temperature,
+                    http_options={"api_version": "v1beta"},
+                ),
+            )
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            if ("404" in msg or "not found" in msg) and idx < len(models) - 1:
+                logger.warning("Model '%s' not found; falling back to next Gemini model.", model_name)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No Gemini model available")
 
 
 def _search_tinysearch(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
@@ -126,21 +252,29 @@ def _fetch_tinyfetch(urls: List[str]) -> Dict[str, Dict[str, Any]]:
 def verify_claim_externally(
     query: str,
     max_sources: int = 3,
+    brand_name: Optional[str] = None,
 ) -> List[ExternalEvidenceItem]:
-    """Discover and fetch live external web evidence for a factual or promotional claim.
+    """Discover, fetch, and relevance-filter live external web evidence for a factual claim.
 
     - Discovers candidate URLs via Exa Search and TinySearch.
     - Fetches full page excerpts & publication dates via TinyFetch.
+    - Rejects unrelated-company websites when `brand_name` is active.
     - Degrades unavailable/blocked/timed-out sources gracefully to `status="unavailable"`.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     if not query or not query.strip():
         return []
 
+    search_query = query.strip()
+    if brand_name and brand_name.lower() not in search_query.lower():
+        # Include brand context when claim uses first-person pronouns
+        if re.search(r"\b(we|our|us)\b", search_query, re.IGNORECASE):
+            search_query = f'"{brand_name}" {search_query}'
+
     candidates: Dict[str, Dict[str, Any]] = {}
 
     # 1. Discover via Exa Search
-    for item in _search_exa(query, max_results=max_sources):
+    for item in _search_exa(search_query, max_results=max_sources):
         url = (item.get("url") or "").strip()
         if url and url not in candidates:
             candidates[url] = {
@@ -152,7 +286,7 @@ def verify_claim_externally(
 
     # 2. Discover via TinySearch (fills up to max_sources or supplements Exa)
     if len(candidates) < max_sources:
-        for item in _search_tinysearch(query, max_results=max_sources):
+        for item in _search_tinysearch(search_query, max_results=max_sources):
             url = (item.get("url") or "").strip()
             if url and url not in candidates:
                 candidates[url] = {
@@ -202,7 +336,6 @@ def verify_claim_externally(
             excerpt = snippet
             pub_date = base.get("published_date")
             title = base.get("title")
-            # If Exa already gave us a substantial excerpt, keep 'ok'; otherwise mark 'unavailable'
             status = "ok" if len(snippet) >= 120 else "unavailable"
             err_reason = None if status == "ok" else fetched.get("error", "page_unavailable")
         else:
@@ -227,14 +360,18 @@ def verify_claim_externally(
             )
         )
 
-    return evidence_list
+    return filter_relevant_external_evidence(
+        evidence_list,
+        claim_text=query,
+        brand_name=brand_name,
+    )
 
 
-def verify_claims(content: ContentPayload) -> List[FlagDraft]:
-    """Gaurav's plugin hook (`backend/app/plugins/verification.py`):
-    Extract factual/promotional claims from `ContentPayload`, verify them against live external
+def verify_claims(content: ContentPayload, brand_name: Optional[str] = None) -> List[FlagDraft]:
+    """Extract factual/promotional claims from `ContentPayload`, verify them against live external
     web sources (Exa + TinyFish), and return `List[FlagDraft]`.
     """
+    active_brand = brand_name or getattr(content, "brand_name", None)
     text = extract_from_payload(content)
     if not text:
         return [
@@ -252,7 +389,6 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
 
     client = get_genai_client()
 
-    # Step 1: Extract up to 3 verifiable factual or promotional claims from the text
     extract_prompt = (
         "You are a brand compliance claim extractor.\n"
         "Identify up to 3 factual, statistical, comparative, or guarantee claims in the draft below "
@@ -265,15 +401,7 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
 
     extracted_claims: List[Dict[str, str]] = []
     try:
-        res = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=extract_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                http_options={"api_version": "v1beta"},
-            ),
-        )
+        res = _generate_with_model_fallback(client, extract_prompt)
         parsed = json.loads(res.text or "{}")
         extracted_claims = (parsed.get("claims") or [])[:3]
     except Exception as exc:
@@ -293,39 +421,47 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
             )
         ]
 
-    # Step 2: For each claim, fetch live external evidence and ask Gemini to assess it
     flags: List[FlagDraft] = []
     for item in extracted_claims:
         passage = (item.get("passage") or "").strip() or text[:80].strip()
         location = (item.get("location") or "content").strip()
         search_query = (item.get("search_query") or passage).strip()
 
-        evidence_items = verify_claim_externally(search_query, max_sources=2)
-        ok_sources = [e for e in evidence_items if e.status == "ok" and e.excerpt]
+        evidence_items = verify_claim_externally(search_query, max_sources=2, brand_name=active_brand)
+        ok_sources = [e for e in evidence_items if e.status == "ok" and e.excerpt and e.entity_matched]
 
         if not ok_sources:
+            rejected_unrelated = any(
+                (e.rejected_reason or "").startswith("unrelated_company_source") for e in evidence_items
+            )
+            explanation = (
+                "External search returned unrelated company websites that were excluded; no relevant public source verified this claim."
+                if rejected_unrelated
+                else "External sources were unavailable or returned insufficient evidence to verify this claim."
+            )
             flags.append(
                 FlagDraft(
                     finding_type="claim",
                     state="insufficient_evidence",
                     passage=passage,
                     location=location,
-                    explanation="External sources were unavailable or returned insufficient evidence to verify this claim.",
+                    explanation=explanation,
                     why_it_matters="Publishing unverified claims exposes the organisation to compliance and credibility risks.",
                     external_sources=[
                         ExternalSource(
                             url=e.url,
-                            excerpt=e.excerpt or f"Source unavailable ({e.error_reason or 'unreachable'})",
+                            excerpt=e.excerpt or f"Source unavailable ({e.rejected_reason or e.error_reason or 'unreachable'})",
                             title=e.title,
                             domain=e.domain,
                             published_date=e.published_date,
                             retrieved_at=e.retrieved_at,
                             status=e.status,
-                            error_reason=e.error_reason,
+                            error_reason=e.rejected_reason or e.error_reason,
                         )
                         for e in evidence_items
+                        if not (e.rejected_reason or "").startswith("unrelated_company_source")
                     ],
-                    uncertainty_note="External sources could not be retrieved or lacked relevant evidence. Human review required.",
+                    uncertainty_note="External sources could not verify this claim without unrelated-entity ambiguity. Human review required.",
                     suggested_correction=None,
                     origin="module",
                 )
@@ -344,7 +480,7 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
             "- 'contradicted': external evidence refutes or conflicts with the claim.\n"
             "- 'insufficient_evidence': evidence is partial, outdated, ambiguous, or does not prove an absolute/superlative claim.\n"
             "Provide a clear plain-language `explanation`, `why_it_matters`, an `uncertainty_note` (if state != 'supported'), "
-            "and a minimal intent-preserving `suggested_correction` (if state != 'supported').\n"
+            "and a minimal intent-preserving `suggested_correction` (ONLY if supported by evidence, else null).\n"
             "Return ONLY valid JSON:\n"
             '{"state": "supported|contradicted|insufficient_evidence", "explanation": "...", '
             '"why_it_matters": "...", "uncertainty_note": "..." or null, "suggested_correction": "..." or null}\n\n'
@@ -352,15 +488,7 @@ def verify_claims(content: ContentPayload) -> List[FlagDraft]:
         )
 
         try:
-            eval_res = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=eval_prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                    http_options={"api_version": "v1beta"},
-                ),
-            )
+            eval_res = _generate_with_model_fallback(client, eval_prompt)
             verdict = json.loads(eval_res.text or "{}")
             state = verdict.get("state", "insufficient_evidence")
             if state not in ("supported", "contradicted", "insufficient_evidence"):

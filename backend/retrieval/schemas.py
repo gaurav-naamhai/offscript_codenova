@@ -6,8 +6,8 @@ Includes both:
    (`ContentPayload`, `GuidelineRef`, `ExternalSource`, `FlagDraft`).
 """
 
-from dataclasses import dataclass
-from typing import List, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,10 @@ class DocumentChunk(BaseModel):
     page_number: int
     section: Optional[str] = None
     content: str
+    rule_category: str = "guideline"
+    keywords: List[str] = Field(default_factory=list)
+    contains_expiry: bool = False
+    expiry_hint: Optional[str] = None
 
 
 class BrandDocumentRecord(BaseModel):
@@ -53,6 +57,11 @@ class BrandDocumentRecord(BaseModel):
     source_filename: Optional[str] = None
     storage_path: Optional[str] = None
     chunks_count: int = 0
+    org_id: str = "inkloom"
+    brand_name: Optional[str] = None
+    previous_version_id: Optional[str] = None
+    constitution: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
 
 
 class BrandChunkMatch(BaseModel):
@@ -67,6 +76,10 @@ class BrandChunkMatch(BaseModel):
     section: Optional[str] = None
     content: str
     similarity: float
+    org_id: Optional[str] = None
+    match_type: str = "semantic"
+    matched_terms: List[str] = Field(default_factory=list)
+    hybrid_score: Optional[float] = None
 
 
 class ExternalEvidenceItem(BaseModel):
@@ -81,6 +94,9 @@ class ExternalEvidenceItem(BaseModel):
     excerpt: str = ""
     status: Literal["ok", "unavailable"] = "ok"
     error_reason: Optional[str] = None
+    relevance_score: float = 1.0
+    entity_matched: bool = True
+    rejected_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +115,10 @@ class ContentPayload:
     file_name: Optional[str] = None
     file_mime: Optional[str] = None
     file_bytes: Optional[bytes] = None
+    org_id: Optional[str] = None
+    brand_name: Optional[str] = None
+    extracted_text: Optional[str] = None
+    extracted_pages: Optional[List[dict]] = field(default=None)
 
 
 class GuidelineRef(BaseModel):
@@ -112,6 +132,11 @@ class GuidelineRef(BaseModel):
     page_number: Optional[int] = None
     similarity: Optional[float] = None
     exact_violated_passage: Optional[str] = None
+    org_id: Optional[str] = None
+    category: Optional[str] = None
+    match_type: Optional[str] = None
+    matched_terms: List[str] = Field(default_factory=list)
+    version: Optional[str] = None
 
 
 class ExternalSource(BaseModel):

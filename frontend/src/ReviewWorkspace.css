@@ -417,3 +417,98 @@
   margin-top: 10px;
   font-size: 13px;
 }
+
+.readiness-strip {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.readiness-stat {
+  background: #e9e2de;
+  color: #28110f;
+  border-radius: 12px;
+  padding: 14px 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.readiness-stat-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.readiness-stat span {
+  font-size: 13px;
+  color: #5f4841;
+  font-weight: 600;
+}
+
+.readiness-stat small {
+  font-size: 12px;
+  color: #715850;
+}
+
+.readiness-stat strong {
+  font-size: 20px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.recurring-coach-banner {
+  background: #fef3c7;
+  color: #78350f;
+  border: 1px solid #f59e0b;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+
+.recurring-coach-banner ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.version-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.version-pill {
+  border: 1px solid #c8bab6;
+  background: #fffdfc;
+  color: #4b3832;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.version-pill.active {
+  background: #dec9f2;
+  border-color: #9f79c4;
+  color: #28110f;
+}
+
+.override-box {
+  background: #fef3c7;
+  color: #78350f;
+  padding: 8px 12px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+@media (max-width: 760px) {
+  .readiness-strip {
+    grid-template-columns: 1fr;
+  }
+}

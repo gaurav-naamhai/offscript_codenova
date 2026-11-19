@@ -33,15 +33,17 @@ Your role is to rigorously evaluate draft publications against authoritative, re
 
 CRITICAL OPERATIONAL RULES:
 1. STRICT GROUNDING: You must ONLY evaluate against the provided brand guidelines. NEVER invent unwritten corporate rules, subjective stylistic preferences, or fictional guidelines.
-2. CITATION REQUIREMENT: Every finding MUST explicitly cite the exact guideline_document, guideline_section, and guideline_excerpt from the provided guidelines.
-3. UNCERTAINTY HANDLING: If a guideline is ambiguous, incomplete, or if the submission is borderline, set state='unclear' and supply a clear uncertainty_note. Do not fabricate an authoritative violation when guidelines are unclear.
-4. VIOLATION CLASSIFICATION: For violations (state='potential_issue'):
+2. DO NOT FALSE-FLAG COMPLIANT CONTENT: If a submission obeys the retrieved brand guidelines, DO NOT invent issues or rewrite approved wording. Return state='aligned' with suggested_fix=null.
+3. NO INVENTED FACTS OR DESCRIPTIONS: In suggested_fix, NEVER invent product descriptions, features, specifications, prices, ingredients, percentages, or claims not present in the original draft or explicitly stated in the retrieved guidelines. When state='aligned', suggested_fix MUST be null.
+4. CITATION REQUIREMENT: Every finding MUST explicitly cite the exact guideline_document, guideline_section, and guideline_excerpt from the provided guidelines.
+5. UNCERTAINTY HANDLING: If a guideline is ambiguous, incomplete, or if the submission is borderline, set state='unclear' and supply a clear uncertainty_note. Do not fabricate an authoritative violation when guidelines are unclear.
+6. VIOLATION CLASSIFICATION: For genuine violations (state='potential_issue'):
    - Specify violation_category ('tone', 'buzzword', 'superlative', 'terminology', 'visual', 'positioning', 'other').
    - Provide an objective, clear explanation of the conflict.
    - Explain 'why_it_matters' from a brand equity, risk, or clarity perspective.
-   - Propose an intent-preserving, minimal replacement (suggested_fix).
-5. ALIGNED FINDINGS: For compliant sections adhering to specific guidelines, include findings with state='aligned'.
-6. MULTIMODAL VERIFICATION: For image or PDF assets, check visual brand consistency (logo placement, typography, color harmony, visual tone) against visual guidelines.
+   - Propose an intent-preserving, minimal replacement (suggested_fix) that preserves all factual details.
+7. ALIGNED FINDINGS: For compliant sections adhering to specific guidelines, include findings with state='aligned' and suggested_fix=null.
+8. MULTIMODAL VERIFICATION: For image or PDF assets, check visual brand consistency (logo placement, typography, color harmony, visual tone) against visual guidelines.
 
 Always return valid JSON adhering strictly to the BrandVerificationOutput schema."""
 
@@ -245,6 +247,8 @@ def validate_and_ground_findings(
                 f.exact_violated_passage, matched_g.excerpt
             )
             f.exact_violated_passage = verified_vp
+            if f.state == "aligned":
+                f.suggested_fix = None
             grounded_findings.append(f)
         else:
             # Finding cites an ungrounded or hallucinated guideline

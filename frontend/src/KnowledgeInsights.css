@@ -1,1 +1,47 @@
 .knowledge-page,.insights-page{padding:8px 5px 30px}.ki-heading h1{font:italic clamp(42px,5vw,62px)/1.1 'Playfair Display',Georgia,serif;letter-spacing:-.04em;color:#e3c8f4;margin:0 0 10px}.ki-heading p{margin:0;font-size:18px}.ki-disclosure{font-size:14px;line-height:1.5;margin:18px 0}.ki-feedback{color:#e3c8f4}.ki-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,.85fr);gap:16px}.ki-side{display:grid;gap:16px;align-content:start}.ki-panel{padding:24px;min-width:0}.ki-panel h2{font-size:33px;margin:0 0 16px}.ki-panel h3{margin:20px 0 10px}.ki-filters{display:grid;grid-template-columns:2fr 1fr;gap:12px}.ki-filters label,.ki-field{display:grid;gap:6px;font-weight:700;margin-bottom:12px}.ki-filters input,.ki-filters select,.ki-field input,.ki-field select,.ki-field textarea{min-width:0;width:100%;padding:9px;border:1px solid #aa9d98;border-radius:8px;background:#fff;color:#28110f;font:inherit}.ki-doc{display:flex;justify-content:space-between;gap:12px;align-items:center;width:100%;text-align:left;padding:14px;border:0;border-top:1px solid #c7bab4;background:transparent;color:#28110f;font:inherit;cursor:pointer}.ki-doc span{font-size:13px}.ki-retry{border:1px solid #fff;border-radius:8px;padding:9px 14px;background:transparent;color:#fff;font:inherit;cursor:pointer}.ki-total{display:flex;justify-content:space-between;align-items:center;padding:18px 24px;margin:18px 0}.ki-total strong{font:700 40px Georgia,serif}.insight-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.insight-list{list-style:none;margin:0;padding:0}.insight-list li{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid #c7bab4;text-transform:none}.insight-list span{overflow-wrap:anywhere}@media(max-width:760px){.ki-grid,.ki-filters,.insight-grid{grid-template-columns:1fr}.ki-doc{align-items:flex-start;flex-direction:column}.ki-panel{padding:18px}}
+
+.ki-subtabs { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+.ki-subtab {
+  border: 1px solid rgba(255, 249, 246, 0.3);
+  background: rgba(32, 13, 12, 0.45);
+  color: #fff9f6;
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ki-subtab.active { background: #d7bbed; color: #1d1018; border-color: #d7bbed; }
+
+.ki-constitution { padding: 20px 24px; margin-bottom: 18px; }
+.constitution-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; margin-top: 14px; }
+.constitution-grid h3 { margin: 0 0 8px; font-size: 14px; color: #5f4841; }
+.constitution-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+.chip-wrap { display: flex; gap: 6px; flex-wrap: wrap; }
+.term-chip.forbidden {
+  background: #fee2e2; color: #991b1b; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+}
+.color-swatch-chip {
+  display: inline-flex; align-items: center; gap: 6px; background: #f3ece9; border: 1px solid #d5c8c3;
+  padding: 3px 8px; border-radius: 999px; font-size: 12px; font-family: monospace;
+}
+.swatch-dot { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, 0.2); }
+
+.rect-list { display: grid; gap: 14px; }
+.rect-card { border: 1px solid #d8ccc8; background: #fffdfc; border-radius: 12px; padding: 16px; }
+.rect-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.rect-badge { font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; }
+.rect-badge.type-expired, .rect-badge.type-conflicting, .rect-badge.sev-high { background: #fee2e2; color: #991b1b; }
+.rect-badge.type-unclear, .rect-badge.sev-medium { background: #fef3c7; color: #92400e; }
+.rect-badge.type-duplicate, .rect-badge.sev-low { background: #e2e8f0; color: #334155; }
+.rect-status { font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; background: #f1ebe8; color: #4b5563; }
+.rect-status.status-approved { background: #bbf7d0; color: #166534; }
+.rect-problem { margin: 0 0 10px; font-size: 14px; color: #28110f; }
+.rect-compare { display: grid; gap: 10px; margin-bottom: 12px; }
+.rect-original { margin: 4px 0 0; font-size: 13px; background: #f7f3f1; padding: 9px 11px; border-radius: 8px; white-space: pre-wrap; }
+.rect-edit-area label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 5px; }
+.rect-edit-area textarea { width: 100%; padding: 9px; border: 1px solid #aa9d98; border-radius: 8px; font: inherit; font-size: 13px; }
+
+@media (max-width: 760px) {
+  .constitution-grid { grid-template-columns: 1fr; }
+}

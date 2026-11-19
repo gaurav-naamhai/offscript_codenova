@@ -18,6 +18,8 @@ def settings():
     return Settings(
         frontend_origin="http://allowed.test,http://app.test/",
         repo_backend="memory",
+        require_auth=False,
+        enforce_approval_gates=False,
     )
 
 

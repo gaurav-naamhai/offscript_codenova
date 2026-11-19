@@ -33,26 +33,26 @@ class Settings:
         default_factory=lambda: os.getenv("REPO_BACKEND", "memory").lower()
     )
     gemini_api_key: str = field(
-        default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", "").strip()
     )
     gemini_model: str = field(
         default_factory=lambda: os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite"
     )
     mock_ai: bool = field(
-        default_factory=lambda: os.getenv("MOCK_AI", "false").lower()
+        default_factory=lambda: os.getenv("MOCK_AI", "false").strip().lower()
         in ("true", "1", "yes")
     )
     exa_api_key: str = field(
-        default_factory=lambda: os.getenv("EXA_API_KEY", "")
+        default_factory=lambda: os.getenv("EXA_API_KEY", "").strip()
     )
     tinyfish_api_key: str = field(
-        default_factory=lambda: os.getenv("TINYFISH_API_KEY", "")
+        default_factory=lambda: os.getenv("TINYFISH_API_KEY", "").strip()
     )
     supabase_url: str = field(
-        default_factory=lambda: os.getenv("SUPABASE_URL", "")
+        default_factory=lambda: os.getenv("SUPABASE_URL", "").strip()
     )
     supabase_service_key: str = field(
-        default_factory=lambda: os.getenv("SUPABASE_SERVICE_KEY", "")
+        default_factory=lambda: os.getenv("SUPABASE_SERVICE_KEY", "").strip()
     )
     demo_mode: bool = field(
         default_factory=lambda: os.getenv("DEMO_MODE", "false").lower()
@@ -60,6 +60,17 @@ class Settings:
     )
     external_services_enabled: str = field(
         default_factory=lambda: os.getenv("EXTERNAL_SERVICES_ENABLED", "")
+    )
+    require_auth: bool = field(
+        default_factory=lambda: os.getenv("REQUIRE_AUTH", "true").lower()
+        in ("true", "1", "yes")
+    )
+    enforce_approval_gates: bool = field(
+        default_factory=lambda: os.getenv("ENFORCE_APPROVAL_GATES", "true").lower()
+        in ("true", "1", "yes")
+    )
+    auth_secret: str = field(
+        default_factory=lambda: os.getenv("AUTH_SECRET", "inkloom-dev-secret-change-in-prod")
     )
 
     def __post_init__(self):

@@ -45,6 +45,7 @@ CRITICAL OPERATIONAL RULES:
      * Normal body text requires at least 4.5:1 contrast.
      * Large text (headings >= 18pt/24px regular or >= 14pt/18.5px bold) and UI components require at least 3.0:1 contrast.
      * Do NOT fail large text if its contrast ratio is >= 3.0:1.
+     * CRITICAL FALSE-POSITIVE RULE: ONLY report a contrast issue if the calculated ratio is STRICTLY BELOW the threshold (< 4.5:1 for normal text, or < 3.0:1 for large text/headings/CTA buttons). NEVER report passing contrast pairs (e.g. dark text on white, white text on dark background, ratio >= 4.5:1) as issues!
    - STRICT DISTINCTION: MEASURED vs. VISUAL ESTIMATES:
      * Never label visually estimated colors or eyeball estimates as '[Measured]'.
      * When contrast is calculated from visual color estimates of an image screenshot, label the finding prefix as '[Visual Estimate: Calculated Contrast]' and state the estimated foreground and background colors.
@@ -159,6 +160,86 @@ def evaluate_wcag_contrast(
         "is_measured": is_measured,
         "prefix": prefix,
     }
+
+
+def extract_measured_palette(file_bytes: bytes, max_colors: int = 5) -> List[str]:
+    """Sample dominant quantized hex colors from an image using PyMuPDF Pixmap (no external deps)."""
+    if not file_bytes:
+        return []
+    try:
+        from collections import Counter
+        import pymupdf
+
+        pix = pymupdf.Pixmap(file_bytes)
+        if pix.alpha:
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+        samples = pix.samples
+        n = pix.n
+        if n < 3 or not samples:
+            return []
+        total_pixels = len(samples) // n
+        step = max(1, total_pixels // 600)
+        buckets: Counter[str] = Counter()
+        for idx in range(0, len(samples) - n + 1, step * n):
+            # Quantize slightly to group anti-aliased shades
+            r = min(255, (samples[idx] // 16) * 16 + 8)
+            g = min(255, (samples[idx + 1] // 16) * 16 + 8)
+            b = min(255, (samples[idx + 2] // 16) * 16 + 8)
+            buckets[f"#{r:02X}{g:02X}{b:02X}"] += 1
+        return [c for c, _ in buckets.most_common(max_colors)]
+    except Exception:
+        return []
+
+
+def filter_false_positive_contrast_issues(issues: List[AccessibilityIssue]) -> List[AccessibilityIssue]:
+    """Verify contrast issues deterministically using WCAG 2.1 math and drop passing pairs."""
+    kept: List[AccessibilityIssue] = []
+    for issue in issues:
+        if issue.issue_type != "contrast":
+            kept.append(issue)
+            continue
+
+        combined = f"{issue.description} {issue.element_location}".lower()
+        is_large_or_ui = any(
+            k in combined for k in ("large text", "headline", "heading", "title", "hero", "button", "cta", "ui component", "banner")
+        )
+        threshold = 3.0 if is_large_or_ui else 4.5
+
+        hexes = re.findall(r"#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b", issue.description)
+        if len(hexes) >= 2:
+            computed = evaluate_wcag_contrast(
+                hexes[0],
+                hexes[1],
+                is_large_text=is_large_or_ui,
+                is_ui_component=is_large_or_ui,
+            )
+            if computed["valid"] and computed["passes_aa"]:
+                logger.info(
+                    "Dropped false-positive contrast finding (%s on %s = %.2f:1 >= %.1f:1).",
+                    hexes[0],
+                    hexes[1],
+                    computed["ratio"],
+                    threshold,
+                )
+                continue
+
+        # Also catch cases where model states a passing ratio like "7.5:1" or "12.4:1"
+        ratio_match = re.search(r"\b(\d+(?:\.\d+)?)\s*:\s*1\b", issue.description)
+        if ratio_match:
+            try:
+                stated_ratio = float(ratio_match.group(1))
+                if stated_ratio >= threshold:
+                    logger.info(
+                        "Dropped false-positive contrast finding with passing ratio %.2f:1 >= %.1f:1.",
+                        stated_ratio,
+                        threshold,
+                    )
+                    continue
+            except ValueError:
+                pass
+
+        kept.append(issue)
+    return kept
 
 
 # ============================================================================
@@ -321,6 +402,11 @@ def analyze_visual_accessibility(
         response_schema=VisualAccessibilityOutput,
         system_instruction=VISUAL_SYSTEM_INSTRUCTION,
     )
+
+    # Filter out false-positive WCAG contrast warnings (e.g. passing contrast flagged erroneously)
+    output.accessibility_issues = filter_false_positive_contrast_issues(output.accessibility_issues)
+    if not output.color_palette and content.file_bytes:
+        output.color_palette = extract_measured_palette(content.file_bytes)
 
     # Post-process: ensure uncertainty notes escalate needs_human
     if output.visual_brand_alignment == "unclear" or output.uncertainty_note:

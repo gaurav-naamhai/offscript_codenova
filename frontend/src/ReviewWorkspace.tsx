@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { serverApi } from './serverApi'
-import type { AuditEvent, RecheckResult, ServerDetail, ServerFlag, VersionInfo } from './serverApi'
+import type {
+  AuditEvent,
+  AuthUser,
+  RecheckResult,
+  ServerDetail,
+  ServerFlag,
+  SubmissionStatus,
+  VersionInfo,
+} from './serverApi'
 import './ReviewWorkspace.css'
+
+type ReviewLens = 'brand' | 'claim' | 'all'
 
 function compareText(original: string, correction: string) {
   const tokenize = (text: string) => text.match(/[\p{L}\p{M}\p{N}]+|[^\p{L}\p{M}\p{N}\s]|\s+/gu) || []
   const before = tokenize(original), after = tokenize(correction)
   const removed = new Set<number>(), added = new Set<number>()
-  // Avoid expensive comparisons for unusually long passages.
   if (before.length * after.length > 1_000_000) return { before, after, removed, added }
   const rows = Array.from({ length: before.length + 1 }, () => new Uint32Array(after.length + 1))
   for (let i = before.length - 1; i >= 0; i--) for (let j = after.length - 1; j >= 0; j--)
@@ -29,11 +39,15 @@ function DiffText({ tokens, changes, kind }: { tokens: string[]; changes: Set<nu
 
 export default function ReviewWorkspace({
   submissionId,
+  user,
+  onSwitchAccount,
   onReturn,
   onNewReview,
   onRefreshList,
 }: {
   submissionId: string
+  user: AuthUser
+  onSwitchAccount: () => void
   onReturn: () => void
   onNewReview?: () => void
   onRefreshList?: () => void
@@ -41,37 +55,51 @@ export default function ReviewWorkspace({
   const [detail, setDetail] = useState<ServerDetail | null>(null)
   const [versions, setVersions] = useState<VersionInfo[]>([])
   const [audit, setAudit] = useState<AuditEvent[]>([])
+  const [viewingVersion, setViewingVersion] = useState<number | null>(null)
   const [fileUrl, setFileUrl] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [lens, setLens] = useState<ReviewLens>('brand')
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
+  const [replacementFile, setReplacementFile] = useState<File | null>(null)
+  const replaceInputRef = useRef<HTMLInputElement>(null)
   const [commentText, setCommentText] = useState('')
   const [decisionComment, setDecisionComment] = useState('')
+  const [overrideChecked, setOverrideChecked] = useState(false)
+  const [overrideReason, setOverrideReason] = useState('')
   const [recheckPreview, setRecheckPreview] = useState<{ flagId: string; result: RecheckResult } | null>(null)
+  const [liveStatus, setLiveStatus] = useState<SubmissionStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (targetVersion?: number | null) => {
     try {
       setError('')
+      const vParam = targetVersion != null ? targetVersion : undefined
       const [d, v, a] = await Promise.all([
-        serverApi.detail(submissionId),
+        serverApi.detail(submissionId, vParam),
         serverApi.versions(submissionId).catch(() => []),
         serverApi.audit(submissionId).catch(() => []),
       ])
       setDetail(d)
       setVersions(v)
       setAudit(a)
-      setEditValue(d.submission.text || '')
+      setEditValue(d.version_snapshot?.text ?? d.submission.text ?? '')
 
       if (d.submission.content_type !== 'text') {
         try {
-          const blob = await serverApi.file(submissionId, d.submission.content_type)
-          setFileUrl(URL.createObjectURL(blob))
+          const blob = await serverApi.file(submissionId, d.submission.content_type, vParam)
+          setFileUrl(prev => {
+            if (prev) URL.revokeObjectURL(prev)
+            return URL.createObjectURL(blob)
+          })
         } catch {
-          // File preview unavailable
+          setFileUrl(prev => {
+            if (prev) URL.revokeObjectURL(prev)
+            return ''
+          })
         }
       }
     } catch (err) {
@@ -82,7 +110,9 @@ export default function ReviewWorkspace({
   }, [submissionId])
 
   useEffect(() => {
-    void loadData()
+    setViewingVersion(null)
+    setLoading(true)
+    void loadData(null)
   }, [loadData])
 
   useEffect(() => {
@@ -91,15 +121,54 @@ export default function ReviewWorkspace({
     }
   }, [fileUrl])
 
+  // Automatic status polling while background AI review runs
+  const currentSubStatus = detail?.submission.status
+  useEffect(() => {
+    if (currentSubStatus !== 'ai_review') {
+      const clearTimer = window.setTimeout(() => setLiveStatus(null), 0)
+      return () => window.clearTimeout(clearTimer)
+    }
+    let active = true
+    const poll = () => {
+      void serverApi
+        .status(submissionId)
+        .then(st => {
+          if (!active) return
+          setLiveStatus(st)
+          if (st.status !== 'ai_review') {
+            void loadData(null)
+            onRefreshList?.()
+          }
+        })
+        .catch(() => {
+          /* ignore transient poll error */
+        })
+    }
+    poll()
+    const interval = window.setInterval(poll, 1400)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [currentSubStatus, submissionId, loadData, onRefreshList])
+
+  async function handleSelectVersion(v: number) {
+    const next = detail && v === detail.submission.version ? null : v
+    setViewingVersion(next)
+    setSelectedId(null)
+    await loadData(next)
+  }
+
   async function handleResolve(flag: ServerFlag, action: 'accept' | 'dismiss') {
-    setBusy(action === 'accept' ? 'Applying suggested correction...' : 'Dismissing finding...')
+    setBusy(action === 'accept' ? 'Applying suggested correction…' : 'Dismissing finding…')
     setError('')
     setNotice('')
     try {
-      await serverApi.resolve(submissionId, flag.id, action, 'creator')
-      await loadData()
+      await serverApi.resolve(submissionId, flag.id, action, user.role)
+      setViewingVersion(null)
+      await loadData(null)
       onRefreshList?.()
-      setNotice(action === 'accept' ? 'Suggested correction applied to text.' : 'Finding dismissed.')
+      setNotice(action === 'accept' ? 'Suggested correction applied.' : 'Finding dismissed.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Resolution action failed.')
     } finally {
@@ -108,12 +177,12 @@ export default function ReviewWorkspace({
   }
 
   async function handleRecheck(flag: ServerFlag) {
-    setBusy('Running recheck simulation on candidate text...')
+    setBusy('Simulating recheck on candidate text…')
     setError('')
     try {
-      const result = await serverApi.recheck(submissionId, flag.id, 'creator')
+      const result = await serverApi.recheck(submissionId, flag.id, user.role)
       setRecheckPreview({ flagId: flag.id, result })
-      setNotice('Recheck preview computed: see results below finding.')
+      setNotice('Recheck preview ready below this finding.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Recheck failed.')
     } finally {
@@ -123,10 +192,10 @@ export default function ReviewWorkspace({
 
   async function handleSaveEdit() {
     if (!detail) return
-    setBusy('Updating draft text...')
+    setBusy('Saving revised draft…')
     setError('')
     try {
-      await serverApi.revise(
+      const updated = await serverApi.revise(
         submissionId,
         'text',
         editValue,
@@ -134,12 +203,18 @@ export default function ReviewWorkspace({
         detail.submission.title || undefined,
         detail.submission.audience || undefined,
         detail.submission.channel || undefined,
-        detail.submission.context || undefined
+        detail.submission.context || undefined,
+        true
       )
       setEditing(false)
-      await loadData()
+      setViewingVersion(null)
+      await loadData(null)
       onRefreshList?.()
-      setNotice('Draft revised. Run compliance check to re-evaluate.')
+      setNotice(
+        updated.version > detail.submission.version
+          ? `Saved as v${updated.version} (v${detail.submission.version} preserved). Run Compliance Check to re-approve.`
+          : 'Draft updated. Run Compliance Check to verify.'
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update draft.')
     } finally {
@@ -147,15 +222,51 @@ export default function ReviewWorkspace({
     }
   }
 
-  async function handleAddComment() {
-    if (!commentText.trim()) return
-    setBusy('Adding review comment...')
+  function handleReplacementSelect(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0] || null
+    setReplacementFile(f)
+    e.target.value = ''
+  }
+
+  async function handleUploadReplacement() {
+    if (!detail || !replacementFile) return
+    setBusy(`Uploading replacement ${detail.submission.content_type.toUpperCase()}…`)
     setError('')
     try {
-      await serverApi.comment(submissionId, 'creator', commentText.trim())
+      const updated = await serverApi.revise(
+        submissionId,
+        detail.submission.content_type as 'image' | 'pdf',
+        '',
+        replacementFile,
+        detail.submission.title || undefined,
+        detail.submission.audience || undefined,
+        detail.submission.channel || undefined,
+        detail.submission.context || undefined,
+        true
+      )
+      setReplacementFile(null)
+      setViewingVersion(null)
+      await loadData(null)
+      onRefreshList?.()
+      setNotice(
+        `Uploaded ${replacementFile.name} on v${updated.version}. Run Compliance Check to evaluate the updated asset.`
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'File replacement failed.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function handleAddComment() {
+    if (!commentText.trim()) return
+    setBusy('Posting review comment…')
+    setError('')
+    try {
+      await serverApi.comment(submissionId, user.role, commentText.trim())
       setCommentText('')
-      await loadData()
-      setNotice('Comment recorded in audit log.')
+      await loadData(viewingVersion)
+      setNotice('Comment recorded.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add comment.')
     } finally {
@@ -163,36 +274,53 @@ export default function ReviewWorkspace({
     }
   }
 
-  async function handleCheck() {
-    setBusy('Running brand guideline & claim verification checks...')
+  async function handleCheck(retry = false) {
+    setBusy(retry ? 'Retrying compliance review…' : 'Starting compliance review…')
     setError('')
+    setNotice('')
     try {
-      await serverApi.check(submissionId)
-      await loadData()
+      if (retry) {
+        await serverApi.retryCheck(submissionId, true)
+      } else {
+        await serverApi.checkAsync(submissionId)
+      }
+      setViewingVersion(null)
+      await loadData(null)
       onRefreshList?.()
-      setNotice('Compliance check completed. Submission moved to Manager Review.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Check pipeline failed.')
+      setError(err instanceof Error ? err.message : 'Could not start compliance check.')
     } finally {
       setBusy('')
     }
   }
 
-  async function handleDecision(role: 'manager' | 'authorised_reviewer', decision: 'approve' | 'request_changes') {
-    const actionLabel = decision === 'approve'
-      ? (role === 'manager' ? 'Recording Manager approval...' : 'Granting Authorised Reviewer sign-off...')
-      : 'Requesting revisions from creator...'
-    setBusy(actionLabel)
+  async function handleDecision(decision: 'approve' | 'request_changes') {
+    if (!detail) return
+    const role = user.role
+    if (role !== 'manager' && role !== 'authorised_reviewer') return
+    setBusy(decision === 'approve' ? 'Recording approval…' : 'Returning draft for changes…')
     setError('')
     try {
-      await serverApi.decide(submissionId, role, decision, decisionComment.trim())
+      await serverApi.decide(
+        submissionId,
+        role,
+        decision,
+        decisionComment.trim(),
+        overrideChecked,
+        overrideReason.trim()
+      )
       setDecisionComment('')
-      await loadData()
+      setOverrideChecked(false)
+      setOverrideReason('')
+      setViewingVersion(null)
+      await loadData(null)
       onRefreshList?.()
       setNotice(
         decision === 'approve'
-          ? (role === 'manager' ? 'Manager approval granted. Ready for final reviewer sign-off.' : 'Final legal & brand approval granted. Publication authorized.')
-          : 'Changes requested. Submission returned to creator as draft (version bumped).'
+          ? role === 'manager'
+            ? 'Manager approval recorded. Ready for Authorised Reviewer sign-off.'
+            : 'Final approval granted. Content cleared for publication.'
+          : 'Changes requested. Returned to Creator as draft with a new version.'
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to record decision.')
@@ -201,10 +329,26 @@ export default function ReviewWorkspace({
     }
   }
 
+  async function handleExportCertificate() {
+    try {
+      const cert = await serverApi.certificate(submissionId)
+      const blob = new Blob([JSON.stringify(cert, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${cert.certificate_id}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      setNotice(`Exported compliance certificate ${cert.certificate_id}.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not export certificate.')
+    }
+  }
+
   if (loading) {
     return (
       <div className="review-workspace">
-        <p className="workspace-notice" role="status">Preparing results…</p>
+        <p className="workspace-notice" role="status">Loading review workspace…</p>
       </div>
     )
   }
@@ -219,34 +363,55 @@ export default function ReviewWorkspace({
   }
 
   const sub = detail.submission
+  const activeSnapshot = detail.version_snapshot
+  const isHistoricalView = viewingVersion != null && viewingVersion !== sub.version
+  const displayedText = (activeSnapshot?.text ?? sub.text) || ''
+  const displayedFileName = activeSnapshot?.file_name ?? sub.file_name
   const flags = detail.flags
-  const otherChecks = flags.filter(f => ['aligned', 'supported'].includes(f.state) && f.origin !== 'error')
-  const findings = flags.filter(f => !otherChecks.includes(f))
-  const label = (state: string) => ({ aligned: 'Aligned', supported: 'Supported', potential_issue: 'Potential issue', unclear: 'Unclear', contradicted: 'Contradicted', insufficient_evidence: 'Insufficient evidence' } as Record<string, string>)[state] || state.replaceAll('_', ' ')
-  const selectedFlag = flags.find(f => f.id === selectedId)
+  const recurringHints = detail.recurring_hints || []
+  const blockingCount = detail.unresolved_blocking_count ?? flags.filter(f => f.status === 'open' && (f.origin === 'error' || ['potential_issue', 'contradicted', 'insufficient_evidence', 'unclear'].includes(f.state))).length
+  const hasBlockingError = flags.some(f => f.status === 'open' && f.origin === 'error')
+  const isSafeToPost = blockingCount === 0 && !hasBlockingError
+  const rawBrandScore = detail.brand_score ?? 100
+  const rawFactScore = detail.fact_score ?? 100
+  const aiConfidence = isSafeToPost
+    ? Math.round((rawBrandScore + rawFactScore) / 2)
+    : Math.min(rawBrandScore, rawFactScore)
+  const confidenceTier = aiConfidence >= 85 && isSafeToPost ? 'High' : aiConfidence >= 60 ? 'Medium' : 'Low'
+  const confidenceColor = confidenceTier === 'High' ? '#166534' : confidenceTier === 'Medium' ? '#92400e' : '#b91c1c'
 
-  // Location is free-form. A unique occurrence in the submitted text is the only
-  // location we can identify safely without inventing offsets or file coordinates.
-  const groupFindings = (items: ServerFlag[]) => {
-    const groups: ServerFlag[][] = []
-    const byPassage = new Map<string, ServerFlag[]>()
-    for (const f of items) {
-      const version = (f as ServerFlag & { version?: number }).version
-      const text = sub.text || ''
-      const first = f.passage ? text.indexOf(f.passage) : -1
-      const unique = sub.content_type === 'text' && f.origin !== 'error' && f.passage.trim().toLowerCase() !== '(whole submission)' && first >= 0 && text.indexOf(f.passage, first + 1) < 0 && (version == null || version === sub.version)
-      const existing = unique ? byPassage.get(f.passage) : undefined
-      if (existing) existing.push(f)
-      else { const group = [f]; groups.push(group); if (unique) byPassage.set(f.passage, group) }
-    }
-    return groups
-  }
+  const otherChecks = flags.filter(f => ['aligned', 'supported'].includes(f.state) && f.origin !== 'error')
+  const actionableFindings = flags.filter(f => !otherChecks.includes(f))
+  const brandFindings = actionableFindings.filter(f => f.finding_type === 'brand')
+  const claimFindings = actionableFindings.filter(f => f.finding_type === 'claim')
+  const lensFindings =
+    lens === 'brand' ? brandFindings : lens === 'claim' ? claimFindings : actionableFindings
+
+  const label = (state: string) =>
+    ({
+      aligned: 'Aligned',
+      supported: 'Supported',
+      potential_issue: 'Potential issue',
+      unclear: 'Unclear',
+      contradicted: 'Contradicted',
+      insufficient_evidence: 'Insufficient evidence',
+    } as Record<string, string>)[state] || state.replaceAll('_', ' ')
+
+  const selectedFlag = flags.find(f => f.id === selectedId)
+  const latestRequestChanges = [...detail.decisions].reverse().find(d => d.decision === 'request_changes')
+  const stage = liveStatus?.processing_stage || sub.processing_stage || 'extracting'
+  const progressPct = liveStatus?.progress_pct ?? (sub.status === 'ai_review' ? 35 : 100)
+  const stageOrder = ['extracting', 'retrieving_guidelines', 'verifying_and_assessing', 'synthesizing']
+  const currentStageIdx =
+    stage === 'understanding_content'
+      ? 1
+      : stageOrder.indexOf(stage) >= 0
+      ? stageOrder.indexOf(stage)
+      : 0
 
   const renderFindingCard = (f: ServerFlag, index?: number) => {
     const isError = f.origin === 'error'
     const wholeDraft = f.passage.trim().toLowerCase() === '(whole submission)'
-
-    // Evidence resolution
     const internalList = f.internal_evidence?.length
       ? f.internal_evidence
       : f.guideline_refs?.length
@@ -254,17 +419,12 @@ export default function ReviewWorkspace({
       : f.guideline_ref
       ? [f.guideline_ref]
       : []
-
-    const externalList = f.external_evidence?.length
-      ? f.external_evidence
-      : f.external_sources || []
-
+    const externalList = f.external_evidence?.length ? f.external_evidence : f.external_sources || []
     const isInsufficient =
       f.evidence_mode === 'insufficient_evidence' ||
       f.state === 'insufficient_evidence' ||
       (internalList.length === 0 && externalList.length === 0)
 
-    // Flagged text resolution
     const span = f.flagged_span
     const surrounding = span?.surrounding_passage || f.passage || ''
     const exactOffending = span?.exact_text || ''
@@ -282,7 +442,6 @@ export default function ReviewWorkspace({
       }
     }
 
-    // Diff resolution
     const diff =
       f.suggested_correction && !wholeDraft && f.passage
         ? compareText(f.passage, f.suggested_correction)
@@ -302,379 +461,202 @@ export default function ReviewWorkspace({
         : 'External Evidence'
 
     return (
-      <article
-        className={`evidence-first-card${isError ? ' finding-incomplete' : ''}`}
-        key={f.id}
-      >
-        {/* Header Bar */}
+      <article className={`evidence-first-card stagger-card${isError ? ' finding-incomplete' : ''}`} key={f.id}>
         <div className="finding-header-bar">
           <div className="finding-header-left">
-            {index != null && (
-              <span className="finding-title-badge">Finding {index + 1}</span>
-            )}
-            <span className="finding-type-pill">
-              {f.finding_type === 'brand' ? 'Brand Guideline' : 'Fact / Claim'}
-            </span>
+            {index != null && <span className="finding-title-badge">Finding {index + 1}</span>}
+            <span className="finding-type-pill">{f.finding_type === 'brand' ? 'Brand Guideline' : 'External Fact / Claim'}</span>
             <span className={`finding-state-pill ${f.state}`}>{label(f.state)}</span>
             <span className="finding-mode-pill">{modeLabel}</span>
           </div>
-          <div>
-            <span
-              className="finding-mode-pill"
-              style={{
-                textTransform: 'capitalize',
-                background: f.status === 'resolved' ? '#bbf7d0' : '#f1ebe8',
-                color: f.status === 'resolved' ? '#166534' : '#4b5563',
-              }}
-            >
-              Status: {f.status}
-            </span>
-          </div>
+          <span
+            className="finding-mode-pill"
+            style={{
+              textTransform: 'capitalize',
+              background: f.status !== 'open' ? '#bbf7d0' : '#f1ebe8',
+              color: f.status !== 'open' ? '#166534' : '#4b5563',
+            }}
+          >
+            Status: {f.status}
+          </span>
         </div>
 
-        {/* Section 1: Supporting Evidence (Top) */}
+        {/* 1. Supporting Evidence */}
         <div className="finding-section evidence-section">
           <div className="finding-section-heading">
             <span>1. Supporting Evidence</span>
-            {internalList.length > 0 && externalList.length > 0 && (
-              <span style={{ fontSize: '11px', color: '#6d5b56' }}>
-                {internalList.length} internal · {externalList.length} external
-              </span>
-            )}
           </div>
-
           <div className="evidence-group-container">
-            {/* Internal Evidence (Supabase RAG) */}
             {internalList.map((ie, i) => (
               <div className="evidence-block internal" key={`int-${i}`}>
                 <div className="evidence-badge-row">
                   <span className="evidence-source-tag internal">
-                    Supabase RAG Guideline
+                    {ie.match_type === 'approved_fact' ? 'Approved Brand Fact' : 'Brand RAG Guideline'}
                   </span>
                   <strong>{ie.document}</strong>
                 </div>
-
                 <div className="evidence-meta-chips">
-                  {ie.section && (
-                    <span className="meta-chip">Section: {ie.section}</span>
-                  )}
-                  {ie.passage_ref && ie.passage_ref !== ie.section && (
-                    <span className="meta-chip">Ref: {ie.passage_ref}</span>
-                  )}
-                  {ie.page_number != null && (
-                    <span className="meta-chip">Page {ie.page_number}</span>
-                  )}
-                  {ie.chunk_id && (
-                    <span className="meta-chip">Chunk #{ie.chunk_id}</span>
-                  )}
-                  {ie.similarity != null && (
-                    <span className="meta-chip">
-                      {Math.round(ie.similarity * 100)}% match
-                    </span>
-                  )}
-                  {ie.source_reference && (
-                    <span className="meta-chip">
-                      {/^(https?:\/\/)/i.test(ie.source_reference) ? (
-                        <a
-                          href={ie.source_reference}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Source link
-                        </a>
-                      ) : (
-                        `Source: ${ie.source_reference}`
-                      )}
-                    </span>
+                  {ie.section && <span className="meta-chip">Section: {ie.section}</span>}
+                  {ie.page_number != null && <span className="meta-chip">Page {ie.page_number}</span>}
+                  {ie.similarity != null && <span className="meta-chip">{Math.round(ie.similarity * 100)}% match</span>}
+                  {ie.matched_terms && ie.matched_terms.length > 0 && (
+                    <span className="meta-chip">Matched: {ie.matched_terms.slice(0, 3).join(', ')}</span>
                   )}
                 </div>
-
-                {/* Exact Violated Guideline Rule (Verbatim only) */}
                 {ie.exact_violated_passage && (
                   <div className="verbatim-guideline-box">
-                    <span className="verbatim-label">
-                      Exact Violated Guideline Rule
-                    </span>
-                    <blockquote className="verbatim-text">
-                      "{ie.exact_violated_passage}"
-                    </blockquote>
+                    <span className="verbatim-label">Exact Cited Rule</span>
+                    <blockquote className="verbatim-text">"{ie.exact_violated_passage}"</blockquote>
                   </div>
                 )}
-
-                {/* Retrieved Guideline Chunk Context */}
-                {ie.excerpt &&
-                  (ie.exact_violated_passage ? (
-                    <details className="retrieved-chunk-details">
-                      <summary>View full retrieved guideline chunk context</summary>
-                      <p>{ie.excerpt}</p>
-                    </details>
-                  ) : (
-                    <div style={{ marginTop: '6px' }}>
-                      <span
-                        className="verbatim-label"
-                        style={{ color: '#6d5b56' }}
-                      >
-                        Retrieved Guideline Passage
-                      </span>
-                      <p
-                        style={{
-                          fontSize: '13px',
-                          color: '#28110f',
-                          margin: '4px 0',
-                          lineHeight: '1.4',
-                        }}
-                      >
-                        {ie.excerpt}
-                      </p>
-                    </div>
-                  ))}
+                {ie.excerpt && (
+                  <details className="retrieved-chunk-details" open={!ie.exact_violated_passage}>
+                    <summary>View retrieved guideline passage</summary>
+                    <p>{ie.excerpt}</p>
+                  </details>
+                )}
               </div>
             ))}
 
-            {/* External Evidence (Exa / Web) */}
             {externalList.map((ee, i) => (
               <div className="evidence-block external" key={`ext-${i}`}>
                 <div className="evidence-badge-row">
-                  <span className="evidence-source-tag external">
-                    Exa / Web Evidence
-                  </span>
+                  <span className="evidence-source-tag external">External Web Evidence</span>
                   <strong>{ee.title || ee.domain || 'External Reference'}</strong>
                 </div>
-
                 <div className="evidence-meta-chips">
-                  {ee.domain && (
-                    <span className="meta-chip">Domain: {ee.domain}</span>
-                  )}
-                  {ee.published_date && (
-                    <span className="meta-chip">Date: {ee.published_date}</span>
-                  )}
-                  {ee.evidence_quality && (
-                    <span className="meta-chip">Quality: {ee.evidence_quality}</span>
-                  )}
+                  {ee.domain && <span className="meta-chip">{ee.domain}</span>}
+                  {ee.published_date && <span className="meta-chip">Published: {ee.published_date}</span>}
+                  {ee.evidence_quality && <span className="meta-chip">Quality: {ee.evidence_quality}</span>}
                 </div>
-
-                {ee.excerpt && (
-                  <p className="external-excerpt-box">"{ee.excerpt}"</p>
-                )}
-
+                {ee.excerpt && <p className="external-excerpt-box">"{ee.excerpt}"</p>}
                 {ee.url && (
-                  <a
-                    className="external-url-link"
-                    href={ee.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
+                  <a className="external-url-link" href={ee.url} target="_blank" rel="noreferrer">
                     {ee.url}
                   </a>
                 )}
               </div>
             ))}
 
-            {/* Insufficient Evidence Callout */}
             {isInsufficient && (
               <div className="evidence-block insufficient">
                 <div className="evidence-badge-row">
-                  <span className="evidence-source-tag insufficient">
-                    Evidence Gap
-                  </span>
-                  <strong>Insufficient Supporting Evidence</strong>
+                  <span className="evidence-source-tag insufficient">Evidence Gap</span>
+                  <strong>Human Verification Needed</strong>
                 </div>
-                <p
-                  style={{
-                    fontSize: '13px',
-                    margin: '4px 0',
-                    color: '#713f12',
-                    lineHeight: '1.4',
-                  }}
-                >
-                  No internal guidelines or verified external evidence were found to
-                  establish compliance or truthfulness for this statement. Human
-                  verification is required.
+                <p style={{ fontSize: '13px', margin: '4px 0', color: '#713f12' }}>
+                  No verified internal fact or relevant external source was sufficient to resolve this item automatically.
                 </p>
               </div>
             )}
           </div>
         </div>
 
-        {/* Section 2: Flagged Content */}
+        {/* 2. Flagged Content */}
         <div className="finding-section flagged-section">
           <div className="finding-section-heading">
             <span>2. Flagged Content</span>
             {f.location && <span className="meta-chip">{f.location}</span>}
           </div>
-
           {wholeDraft ? (
-            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>
-              Applies to the whole draft submission.
-            </p>
+            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>Applies to the full submission.</p>
           ) : f.passage ? (
             <button
               type="button"
               className="flagged-text-display"
               aria-pressed={selectedId === f.id}
               onClick={() => setSelectedId(selectedId === f.id ? null : f.id)}
-              title="Click to highlight location in draft text"
+              title="Highlight location in draft"
             >
               {renderedFlaggedContent}
             </button>
           ) : (
-            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>
-              Exact text location unavailable.
-            </p>
+            <p style={{ fontStyle: 'italic', color: '#6d5b56', margin: '4px 0' }}>Location unavailable.</p>
           )}
         </div>
 
-        {/* Section 3: Explanation & Impact */}
+        {/* 3. Conflict Explanation & Impact */}
         <div className="finding-section explanation-section">
           <div className="finding-section-heading">
-            <span>3. Conflict Explanation &amp; Impact</span>
+            <span>3. Why Flagged &amp; Impact</span>
           </div>
-
           <p className="explanation-body">{f.explanation}</p>
-
           {f.why_it_matters && (
             <div className="why-matters-body">
               <strong>Why it matters:</strong> {f.why_it_matters}
             </div>
           )}
-
           {f.uncertainty_note && (
             <div className="uncertainty-box">
               <strong>Uncertainty Note:</strong> {f.uncertainty_note}
             </div>
           )}
-
-          {f.needs_human && (
-            <div style={{ marginTop: '8px' }}>
-              <span className="finding-state-pill insufficient_evidence">
-                Human Review Required
-              </span>
-            </div>
-          )}
         </div>
 
-        {/* Section 4: Suggestions & Actions */}
+        {/* 4. Suggestions & Actions */}
         <div className="finding-section suggestions-section">
           <div className="finding-section-heading">
-            <span>4. Suggestions &amp; Actions</span>
+            <span>4. Suggested Fix &amp; Actions</span>
           </div>
-
           {f.suggested_correction ? (
             <div className="suggestion-block">
-              <div className="suggestion-title">Suggested Minimal Correction</div>
+              <div className="suggestion-title">Minimal Intent-Preserving Edit</div>
               <div className="suggestion-diff-box">
-                {diff ? (
-                  <DiffText
-                    tokens={diff.after}
-                    changes={diff.added}
-                    kind="added"
-                  />
-                ) : (
-                  <strong>{f.suggested_correction}</strong>
-                )}
+                {diff ? <DiffText tokens={diff.after} changes={diff.added} kind="added" /> : <strong>{f.suggested_correction}</strong>}
               </div>
-
-              {f.suggestion?.change_rationale && (
-                <p className="suggestion-rationale">
-                  {f.suggestion.change_rationale}
-                </p>
+              {f.suggestion?.change_rationale && <p className="suggestion-rationale">{f.suggestion.change_rationale}</p>}
+              {f.suggestion?.preserved_entities && f.suggestion.preserved_entities.length > 0 && (
+                <div className="preserved-entities-row">
+                  <span>Preserved:</span>
+                  {f.suggestion.preserved_entities.map((ent, ei) => (
+                    <span className="preserved-entity-chip" key={ei}>{ent}</span>
+                  ))}
+                </div>
               )}
-
-              {f.suggestion?.preserved_entities &&
-                f.suggestion.preserved_entities.length > 0 && (
-                  <div className="preserved-entities-row">
-                    <span>Preserved entities:</span>
-                    {f.suggestion.preserved_entities.map((ent, ei) => (
-                      <span className="preserved-entity-chip" key={ei}>
-                        {ent}
-                      </span>
-                    ))}
-                  </div>
-                )}
             </div>
           ) : (
-            <p
-              style={{
-                fontSize: '13px',
-                color: '#6d5b56',
-                margin: '0 0 10px 0',
-              }}
-            >
-              No automated correction suggested. Manual adjustment or human decision
-              required.
+            <p style={{ fontSize: '13px', color: '#6d5b56', margin: '0 0 10px 0' }}>
+              No automated rewrite generated — human review or manual edit is safest here.
             </p>
           )}
 
-          {/* Action buttons */}
-          <div className="action-buttons-row">
-            {f.status === 'open' &&
-              f.suggested_correction &&
-              sub.content_type === 'text' && (
-                <button
-                  type="button"
-                  className="btn-accept"
-                  onClick={() => handleResolve(f, 'accept')}
-                  disabled={!!busy}
-                >
+          {!isHistoricalView && user.role === 'creator' && (
+            <div className="action-buttons-row">
+              {f.status === 'open' && f.suggested_correction && sub.content_type === 'text' && (
+                <button type="button" className="btn-accept" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>
                   Accept change
                 </button>
               )}
+              {sub.content_type === 'text' && (
+                <button type="button" className="btn-recheck" onClick={() => handleRecheck(f)} disabled={!!busy}>
+                  Preview recheck
+                </button>
+              )}
+              {f.origin !== 'error' && f.status === 'open' && (
+                <button type="button" className="btn-dismiss" onClick={() => handleResolve(f, 'dismiss')} disabled={!!busy}>
+                  Dismiss finding
+                </button>
+              )}
+              {sub.content_type === 'text' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditValue(sub.text || '')
+                    setEditing(true)
+                  }}
+                  disabled={!!busy || editing}
+                >
+                  Edit manually
+                </button>
+              )}
+            </div>
+          )}
 
-            {sub.content_type === 'text' && (
-              <button
-                type="button"
-                className="btn-recheck"
-                onClick={() => handleRecheck(f)}
-                disabled={!!busy}
-              >
-                Preview recheck
-              </button>
-            )}
-
-            {f.origin !== 'error' && f.status === 'open' && (
-              <button
-                type="button"
-                className="btn-dismiss"
-                onClick={() => handleResolve(f, 'dismiss')}
-                disabled={!!busy}
-              >
-                Dismiss finding
-              </button>
-            )}
-
-            {sub.content_type === 'text' && sub.status === 'draft' && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditValue(sub.text || '')
-                  setEditing(true)
-                }}
-                disabled={!!busy || editing}
-              >
-                Edit manually
-              </button>
-            )}
-          </div>
-
-          {/* Inline Recheck Preview */}
           {recheckPreview && recheckPreview.flagId === f.id && (
             <div className="recheck-result-box">
-              <strong>Recheck simulation results:</strong>
-              <p style={{ margin: '4px 0' }}>
-                Original issue resolved:{' '}
-                <strong>
-                  {recheckPreview.result.original_flag_gone
-                    ? 'Yes (resolved)'
-                    : 'No (still flagged)'}
-                </strong>
-              </p>
-              <p style={{ margin: '4px 0' }}>
-                Remaining findings: {recheckPreview.result.new_flags.length} (
-                {recheckPreview.result.has_needs_human
-                  ? 'Requires human review'
-                  : 'No human-review flags'}
-                )
-              </p>
+              <strong>Recheck preview:</strong> Original issue resolved:{' '}
+              <strong>{recheckPreview.result.original_flag_gone ? 'Yes' : 'No'}</strong> · Remaining findings:{' '}
+              {recheckPreview.result.new_flags.length}
             </div>
           )}
         </div>
@@ -682,53 +664,27 @@ export default function ReviewWorkspace({
     )
   }
 
-  const renderGroup = (group: ServerFlag[]) => {
-    if (group.length === 1) {
-      return renderFindingCard(group[0])
-    }
-
-    const first = group[0]
-    const suggestions = [
-      ...new Set(
-        group.map(f => f.suggested_correction).filter((v): v is string => !!v)
-      ),
-    ]
-    const conflict = suggestions.length > 1
-
-    return (
-      <div key={first.id} style={{ marginTop: '16px' }}>
-        {conflict && (
-          <div
-            className="workspace-notice"
-            style={{
-              background: '#fef3c7',
-              color: '#92400e',
-              marginBottom: '10px',
-            }}
-          >
-            <strong>Multiple findings apply to this passage with different suggestions.</strong>
-          </div>
-        )}
-        {group.map((f, i) => renderFindingCard(f, i))}
-      </div>
-    )
-  }
-
   return (
     <div className="review-workspace">
       <header className="workspace-intro">
         <div>
-          <span className="workspace-kicker">Review workspace</span>
+          <span className="workspace-kicker">{sub.brand_name || user.brand_name} Review</span>
           <h1>{sub.title || 'Untitled submission'}</h1>
           <p>
             Format: <strong>{sub.content_type.toUpperCase()}</strong> · Status:{' '}
             <strong style={{ color: sub.status === 'approved' ? '#6be092' : '#dec9f2' }}>
               {sub.status.replace('_', ' ').toUpperCase()}
             </strong>{' '}
-            · Version <strong>v{sub.version}</strong>
+            · Current <strong>v{sub.version}</strong>
+            {isHistoricalView && ` (Viewing archived v${viewingVersion})`}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          {sub.status === 'approved' && (
+            <button type="button" className="workspace-outline" onClick={() => void handleExportCertificate()}>
+              Export certificate
+            </button>
+          )}
           {onNewReview && (
             <button type="button" className="workspace-outline" onClick={onNewReview}>
               New review
@@ -740,35 +696,130 @@ export default function ReviewWorkspace({
         </div>
       </header>
 
+      {/* Simple Safe-to-Post & AI Confidence Summary */}
+      {sub.status !== 'ai_review' && (
+        <div className="readiness-strip">
+          <div className="readiness-stat">
+            <div className="readiness-stat-label">
+              <span>Posting Status</span>
+              <small>
+                {hasBlockingError
+                  ? 'A check could not complete cleanly'
+                  : isSafeToPost
+                    ? 'No unresolved issues found'
+                    : `${blockingCount} issue${blockingCount > 1 ? 's' : ''} must be fixed or overridden`}
+              </small>
+            </div>
+            <strong style={{ color: isSafeToPost ? '#166534' : '#b91c1c' }}>
+              {isSafeToPost ? 'Safe to post' : 'Not safe to post'}
+            </strong>
+          </div>
+          <div className="readiness-stat">
+            <div className="readiness-stat-label">
+              <span>AI Confidence</span>
+              <small>
+                {isSafeToPost
+                  ? 'Content aligns with guidelines and facts'
+                  : 'Lowered because mistakes or unverified claims were found'}
+              </small>
+            </div>
+            <strong style={{ color: confidenceColor }}>
+              {confidenceTier} ({aiConfidence}%)
+            </strong>
+          </div>
+        </div>
+      )}
+
+      {/* Live Async Processing Stepper */}
+      {sub.status === 'ai_review' && (
+        <div className="processing-card" role="status">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+            <strong style={{ color: '#28110f' }}>Reviewing {sub.content_type.toUpperCase()} against {sub.brand_name || user.brand_name}…</strong>
+            <span className="meta-chip">{progressPct}%</span>
+          </div>
+          <div className="processing-progress-track">
+            <div className="processing-progress-fill" style={{ width: `${progressPct}%` }} />
+          </div>
+          <div className="stage-stepper">
+            {[
+              { key: 'extracting', label: '1. Extract content' },
+              { key: 'retrieving_guidelines', label: '2. Brand RAG' },
+              { key: 'verifying_and_assessing', label: '3. Verify & assess' },
+              { key: 'synthesizing', label: '4. Build flags' },
+            ].map((step, idx) => (
+              <div
+                key={step.key}
+                className={`stage-step ${idx < currentStageIdx ? 'done' : idx === currentStageIdx ? 'active' : ''}`}
+              >
+                <span className="stage-dot" />
+                <span>{step.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Failed processing safe retry */}
+      {sub.processing_stage === 'failed' && (
+        <div className="workspace-notice" role="alert" style={{ background: '#45181b', color: '#ffc5c8', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+          <span>Processing failed safely: {sub.processing_error || 'Provider timeout or error.'}</span>
+          {user.role === 'creator' && (
+            <button type="button" className="btn-accept" onClick={() => void handleCheck(true)}>
+              Retry check
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Changes Requested Banner */}
+      {sub.status === 'draft' && latestRequestChanges && (
+        <div className="workspace-notice" style={{ background: '#fef3c7', color: '#78350f', marginBottom: '14px' }}>
+          <strong>Changes requested by {latestRequestChanges.role.replace('_', ' ')}:</strong>{' '}
+          {latestRequestChanges.comment || 'Please address the flagged findings and resubmit for compliance check.'}
+        </div>
+      )}
+
       {busy && <div className="workspace-banner" role="status">{busy}</div>}
       {notice && <p className="workspace-notice" role="status">{notice}</p>}
       {error && <div className="workspace-notice" role="alert" style={{ background: '#45181b', color: '#ffc5c8' }}>{error}</div>}
 
       <div className="workspace-grid">
-        {/* Left column: Submitted Draft & Context */}
+        {/* Left Column: Draft + Versions + Audit */}
         <section className="panel workspace-panel">
-          <h2>Your draft</h2>
-          <div className="workspace-toolbar">
-            <span className="format-badge">{sub.content_type.toUpperCase()}</span>
-            <span className="format-badge" style={{ background: '#f5e4d5', color: '#422115' }}>
-              v{sub.version}
-            </span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <h2 style={{ margin: 0 }}>Draft</h2>
+            {versions.length > 0 && (
+              <div className="version-pills" role="group" aria-label="Version history">
+                {versions.map(v => {
+                  const activePill = (viewingVersion ?? sub.version) === v.version
+                  return (
+                    <button
+                      type="button"
+                      key={v.version}
+                      className={`version-pill${activePill ? ' active' : ''}`}
+                      onClick={() => void handleSelectVersion(v.version)}
+                    >
+                      v{v.version} ({v.flag_count})
+                    </button>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
           <div className="workspace-paper">
-            <h3>{sub.title || 'Untitled submission'}</h3>
+            <h3>{activeSnapshot?.title || sub.title || 'Untitled submission'}</h3>
             {editing ? (
               <>
+                {sub.status !== 'draft' && (
+                  <p className="workspace-notice" style={{ background: '#fef3c7', color: '#78350f', fontSize: '12px', marginBottom: '10px' }}>
+                    Saving edits will preserve v{sub.version}, create <strong>v{sub.version + 1}</strong>, and require fresh review &amp; approval.
+                  </p>
+                )}
                 <label htmlFor="workspace-edit">Edit draft text</label>
-                <textarea
-                  id="workspace-edit"
-                  value={editValue}
-                  onChange={e => setEditValue(e.target.value)}
-                  rows={10}
-                  disabled={!!busy}
-                />
+                <textarea id="workspace-edit" value={editValue} onChange={e => setEditValue(e.target.value)} rows={10} disabled={!!busy} />
                 <div className="workspace-actions">
-                  <button type="button" onClick={handleSaveEdit} disabled={!!busy}>Save edit</button>
+                  <button type="button" onClick={handleSaveEdit} disabled={!!busy}>Save revision</button>
                   <button type="button" onClick={() => setEditing(false)} disabled={!!busy}>Cancel</button>
                 </div>
               </>
@@ -776,7 +827,7 @@ export default function ReviewWorkspace({
               <p className="workspace-text">
                 {selectedFlag ? (
                   (() => {
-                    const text = sub.text || ''
+                    const text = displayedText
                     const span = selectedFlag.flagged_span
                     if (
                       span?.start_char != null &&
@@ -806,95 +857,188 @@ export default function ReviewWorkspace({
                     return text || 'No text content.'
                   })()
                 ) : (
-                  sub.text || 'No text content.'
+                  displayedText || 'No text content.'
                 )}
               </p>
             ) : fileUrl ? (
               sub.content_type === 'image' ? (
-                <img className="workspace-image" src={fileUrl} alt={sub.file_name || 'Uploaded image'} />
+                <img className="workspace-image" src={fileUrl} alt={displayedFileName || 'Uploaded image'} />
               ) : (
                 <object className="pdf-preview" data={fileUrl} type="application/pdf" aria-label="PDF preview">
-                  <p>PDF preview is unavailable. <a href={fileUrl} target="_blank" rel="noreferrer">Open PDF</a>.</p>
+                  <p>PDF preview unavailable. <a href={fileUrl} target="_blank" rel="noreferrer">Open PDF</a>.</p>
                 </object>
               )
             ) : (
-              <p className="workspace-muted">File: {sub.file_name || 'Binary asset uploaded'}</p>
+              <p className="workspace-muted">File: {displayedFileName || 'Binary asset uploaded'}</p>
             )}
           </div>
 
-          {sub.content_type === 'text' && sub.status === 'draft' && !editing && (
+          {/* Creator Revision / Replacement Controls */}
+          {!isHistoricalView && user.role === 'creator' && !editing && sub.status !== 'ai_review' && (
             <div className="workspace-actions" style={{ marginTop: '12px' }}>
-              <button type="button" onClick={() => { setEditValue(sub.text || ''); setEditing(true) }}>
-                Edit manually
-              </button>
+              {sub.content_type === 'text' ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditValue(sub.text || '')
+                    setEditing(true)
+                  }}
+                >
+                  {sub.status === 'draft' ? 'Edit draft' : `Edit & create v${sub.version + 1}`}
+                </button>
+              ) : (
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    ref={replaceInputRef}
+                    type="file"
+                    className="sr-only"
+                    accept={sub.content_type === 'image' ? 'image/png,image/jpeg,image/webp' : 'application/pdf,.pdf'}
+                    onChange={handleReplacementSelect}
+                  />
+                  <button type="button" onClick={() => replaceInputRef.current?.click()} disabled={!!busy}>
+                    {replacementFile ? `Selected: ${replacementFile.name}` : `Replace ${sub.content_type.toUpperCase()} file`}
+                  </button>
+                  {replacementFile && (
+                    <button type="button" className="btn-accept" onClick={() => void handleUploadReplacement()} disabled={!!busy}>
+                      Upload &amp; {sub.status === 'draft' ? 'save' : `create v${sub.version + 1}`}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Version and Audit History details */}
+          {/* Preserved Version & Audit Trail */}
           <details className="workspace-panel" style={{ marginTop: '16px', background: 'transparent', padding: '8px 0' }}>
             <summary>Version &amp; Audit Trail ({audit.length} events)</summary>
             {versions.length > 0 && (
-              <div style={{ marginTop: '8px' }}>
-                <h4>Recorded versions</h4>
-                <ul>
-                  {versions.map(v => (
-                    <li key={v.version}>
-                      Version {v.version}: {v.flag_count} findings ({v.needs_human_count} require human attention)
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <ul style={{ marginTop: '8px', fontSize: '13px' }}>
+                {versions.map(v => (
+                  <li key={v.version}>
+                    <strong>v{v.version}</strong> ({v.status || 'saved'}): {v.flag_count} findings, {v.decision_count || 0} decisions
+                  </li>
+                ))}
+              </ul>
             )}
             {audit.length > 0 && (
-              <div style={{ marginTop: '8px' }}>
-                <h4>Audit timeline</h4>
-                <ul style={{ fontSize: '13px', lineHeight: '1.5' }}>
-                  {audit.map((evt, idx) => (
-                    <li key={idx}>
-                      <span style={{ color: '#6d5b56' }}>{new Date(evt.timestamp).toLocaleTimeString()}</span> ·{' '}
-                      <strong>{evt.actor || evt.actor_role}</strong> — {evt.action}: {evt.detail}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <ul style={{ marginTop: '8px', fontSize: '13px', lineHeight: '1.5' }}>
+                {audit.map((evt, idx) => (
+                  <li key={idx}>
+                    <span style={{ color: '#6d5b56' }}>{new Date(evt.timestamp).toLocaleTimeString()}</span> ·{' '}
+                    <strong>{evt.actor || evt.actor_role}</strong> — {evt.action}: {evt.detail}
+                  </li>
+                ))}
+              </ul>
             )}
           </details>
         </section>
 
-        {/* Right column: Findings & Evidence */}
+        {/* Right Column: Recurring Coaching + Brand vs External Lens Selector + Findings */}
         <section className="panel workspace-panel">
-          <h2>Findings &amp; evidence</h2>
-          {flags.length === 0 && <p>No findings returned. This does not mean the whole draft passed.</p>}
-          {flags.some(f => f.origin === 'error') && <p className="stale-label" role="status">Some checks are incomplete. Review the findings below.</p>}
-          {flags.some(f => f.origin === 'fixture') && <p>Some findings come from placeholder checks.</p>}
-          {groupFindings(findings).map(renderGroup)}
-          {otherChecks.length > 0 && <details><summary>Other checks ({otherChecks.length})</summary><p>These results do not establish that the whole draft passed.</p>{groupFindings(otherChecks).map(renderGroup)}</details>}
+          <h2>Review findings</h2>
 
-          {/* Comments section */}
+          {recurringHints.length > 0 && (
+            <div className="recurring-coach-banner" role="note">
+              <strong>Recurring Mistake Coaching</strong>
+              <ul>
+                {recurringHints.map((hint, idx) => (
+                  <li key={idx}>{hint.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Primary User Choice: Brand Guidelines vs External Verification */}
+          <div className="lens-bar" role="tablist" aria-label="Choose what went wrong view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={lens === 'brand'}
+              className={`lens-btn${lens === 'brand' ? ' active' : ''}`}
+              onClick={() => setLens('brand')}
+            >
+              <div>
+                Brand Guidelines
+                <span className="lens-btn-meta">What went wrong vs. your brand</span>
+              </div>
+              <span className="lens-count">{brandFindings.length}</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={lens === 'claim'}
+              className={`lens-btn${lens === 'claim' ? ' active' : ''}`}
+              onClick={() => setLens('claim')}
+            >
+              <div>
+                External Verification
+                <span className="lens-btn-meta">What went wrong vs. web facts</span>
+              </div>
+              <span className="lens-count">{claimFindings.length}</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={lens === 'all'}
+              className={`lens-btn${lens === 'all' ? ' active' : ''}`}
+              onClick={() => setLens('all')}
+            >
+              <div>All</div>
+              <span className="lens-count">{actionableFindings.length}</span>
+            </button>
+          </div>
+
+          {flags.some(f => f.origin === 'error') && (
+            <div className="stale-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span>One or more automated checks encountered an error.</span>
+              {user.role === 'creator' && (
+                <button type="button" className="btn-recheck" onClick={() => void handleCheck(true)}>
+                  Retry check
+                </button>
+              )}
+            </div>
+          )}
+
+          {lensFindings.length === 0 ? (
+            <div className="workspace-notice" style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' }}>
+              {lens === 'brand'
+                ? 'No brand guideline violations detected in this draft.'
+                : lens === 'claim'
+                ? 'No contradicted or unverified external claims detected in this draft.'
+                : 'No actionable violations detected.'}
+            </div>
+          ) : (
+            lensFindings.map((f, i) => renderFindingCard(f, i))
+          )}
+
+          {otherChecks.length > 0 && (
+            <details style={{ marginTop: '14px' }}>
+              <summary>Passed / Aligned Checks ({otherChecks.length})</summary>
+              {otherChecks.map(f => renderFindingCard(f))}
+            </details>
+          )}
+
           <details className="local-records">
-            <summary>Review comments</summary>
+            <summary>Review Comments ({detail.comments.length})</summary>
             <label htmlFor="comment">Add review feedback</label>
             <textarea
               id="comment"
               value={commentText}
               onChange={e => setCommentText(e.target.value)}
               rows={2}
-              placeholder="Leave feedback or guidance for creators/approvers..."
+              placeholder="Leave feedback or guidance..."
               disabled={!!busy}
             />
-            <button
-              type="button"
-              onClick={handleAddComment}
-              disabled={!commentText.trim() || !!busy}
-            >
+            <button type="button" onClick={handleAddComment} disabled={!commentText.trim() || !!busy}>
               Post comment
             </button>
-
-            {detail.comments && detail.comments.length > 0 && (
+            {detail.comments.length > 0 && (
               <ul style={{ marginTop: '12px' }}>
                 {detail.comments.map(c => (
                   <li key={c.id}>
-                    <strong>{c.role}</strong> (v{c.version}): {c.text}
+                    <strong>{c.actor_name || c.role}</strong> ({c.role.replace('_', ' ')} · v{c.version}): {c.text}
                   </li>
                 ))}
               </ul>
@@ -903,98 +1047,97 @@ export default function ReviewWorkspace({
         </section>
       </div>
 
-      {/* Streamlined One-Click Role Approvals in Footer */}
+      {/* Role-Enforced Approval Footer with Unresolved-Flag Gate & Authorised Override */}
       <div className="workspace-footer">
         <div>
-          <span>Workflow governance status: <strong>{sub.status.replace('_', ' ').toUpperCase()}</strong></span>
-          {(sub.status === 'manager_review' || sub.status === 'final_approval') && <p>Reviewer roles are simulated; no sign-in is provided.</p>}
+          <span>
+            Stage: <strong>{sub.status.replace('_', ' ').toUpperCase()}</strong> · Signed in as{' '}
+            <strong>{user.name}</strong> ({user.role.replace('_', ' ')})
+          </span>
         </div>
 
         <div className="workspace-actions">
-          {sub.status === 'draft' && (
-            <button
-              type="button"
-              onClick={handleCheck}
-              disabled={!!busy}
-              style={{ background: '#dec9f2', fontWeight: 700 }}
-            >
-              Run Compliance Check →
-            </button>
-          )}
+          {sub.status === 'draft' &&
+            (user.role === 'creator' ? (
+              <button type="button" onClick={() => void handleCheck(false)} disabled={!!busy} style={{ background: '#dec9f2', fontWeight: 700 }}>
+                Run Compliance Check →
+              </button>
+            ) : (
+              <button type="button" onClick={onSwitchAccount}>
+                Switch to Creator to run check
+              </button>
+            ))}
 
-          {sub.status === 'manager_review' && (
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <input
-                type="text"
-                placeholder="Optional manager approval notes..."
-                value={decisionComment}
-                onChange={e => setDecisionComment(e.target.value)}
-                style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #b8aaa4' }}
-                disabled={!!busy}
-              />
-              <button
-                type="button"
-                onClick={() => handleDecision('manager', 'approve')}
-                disabled={!!busy}
-                style={{ background: '#dec9f2', fontWeight: 700 }}
-              >
-                Approve as Manager
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDecision('manager', 'request_changes')}
-                disabled={!!busy}
-              >
-                Request Changes
-              </button>
-            </div>
-          )}
-
-          {sub.status === 'final_approval' && (
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <input
-                type="text"
-                placeholder="Optional final sign-off notes..."
-                value={decisionComment}
-                onChange={e => setDecisionComment(e.target.value)}
-                style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #b8aaa4' }}
-                disabled={!!busy}
-              />
-              <button
-                type="button"
-                onClick={() => handleDecision('authorised_reviewer', 'approve')}
-                disabled={!!busy}
-                style={{ background: '#6be092', color: '#13351d', fontWeight: 700 }}
-              >
-                Final Sign-Off (Authorised Reviewer)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDecision('authorised_reviewer', 'request_changes')}
-                disabled={!!busy}
-              >
-                Request Changes
-              </button>
-            </div>
-          )}
+          {(sub.status === 'manager_review' || sub.status === 'final_approval') && (() => {
+            const requiredRole = sub.status === 'manager_review' ? 'manager' : 'authorised_reviewer'
+            if (user.role !== requiredRole) {
+              return (
+                <button type="button" onClick={onSwitchAccount} style={{ background: '#dec9f2' }}>
+                  Switch to {requiredRole.replace('_', ' ')} to review
+                </button>
+              )
+            }
+            const needsOverride = blockingCount > 0
+            const overrideValid = !needsOverride || (overrideChecked && overrideReason.trim().length >= 10)
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end' }}>
+                {needsOverride && (
+                  <div className="override-box">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '12px' }}>
+                      <input
+                        type="checkbox"
+                        checked={overrideChecked}
+                        onChange={e => setOverrideChecked(e.target.checked)}
+                      />
+                      Authorised override ({blockingCount} open blocking finding{blockingCount > 1 ? 's' : ''})
+                    </label>
+                    {overrideChecked && (
+                      <input
+                        type="text"
+                        placeholder="Required override justification (min 10 chars)..."
+                        value={overrideReason}
+                        onChange={e => setOverrideReason(e.target.value)}
+                        style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #c8bab6', width: '320px' }}
+                      />
+                    )}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder="Decision note (optional)..."
+                    value={decisionComment}
+                    onChange={e => setDecisionComment(e.target.value)}
+                    style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #b8aaa4' }}
+                    disabled={!!busy}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleDecision('approve')}
+                    disabled={!!busy || !overrideValid}
+                    style={{
+                      background: sub.status === 'final_approval' ? '#6be092' : '#dec9f2',
+                      color: sub.status === 'final_approval' ? '#13351d' : '#28110f',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {sub.status === 'manager_review' ? 'Approve as Manager' : 'Final Sign-Off'}
+                  </button>
+                  <button type="button" onClick={() => void handleDecision('request_changes')} disabled={!!busy}>
+                    Request Changes
+                  </button>
+                </div>
+              </div>
+            )
+          })()}
 
           {sub.status === 'approved' && (
-            <span
-              style={{
-                background: '#6be092',
-                color: '#13351d',
-                padding: '8px 16px',
-                borderRadius: '8px',
-                fontWeight: 700,
-              }}
-            >
+            <span style={{ background: '#6be092', color: '#13351d', padding: '8px 16px', borderRadius: '8px', fontWeight: 700 }}>
               ✓ Publication Approved
             </span>
           )}
 
-          <button type="button" onClick={onReturn}>
-            Return to library
-          </button>
+          <button type="button" onClick={onReturn}>Return to library</button>
         </div>
       </div>
     </div>

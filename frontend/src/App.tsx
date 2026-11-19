@@ -7,8 +7,9 @@ import NewReview from './NewReview'
 import ReviewWorkspace from './ReviewWorkspace'
 import GlobalSearch from './GlobalSearch'
 import ReviewWorkflow from './ReviewWorkflow'
-import { serverApi } from './serverApi'
-import type { SubmissionSummary } from './serverApi'
+import AuthModal from './AuthModal'
+import { clearAuthSession, getStoredToken, getStoredUser, serverApi } from './serverApi'
+import type { AuthUser, DemoRole, SubmissionSummary } from './serverApi'
 import './App.css'
 import './ReviewLibrary.css'
 
@@ -31,6 +32,44 @@ type IconName =
   | 'mail'
   | 'text'
   | 'user'
+
+const ROLE_LABELS: Record<DemoRole, string> = {
+  creator: 'Creator',
+  manager: 'Manager',
+  authorised_reviewer: 'Final Reviewer',
+}
+
+function parseHashRoute(): { page: Page; activeId: string | null; knowledgeTab: 'docs' | 'rectify' } {
+  const hash = (window.location.hash || '').replace(/^#\/?/, '')
+  const parts = hash.split('/').filter(Boolean)
+  if (parts[0] === 'review') {
+    if (parts[1] && parts[1] !== 'new') {
+      return { page: 'review', activeId: parts[1], knowledgeTab: 'docs' }
+    }
+    return { page: 'review', activeId: null, knowledgeTab: 'docs' }
+  }
+  if (parts[0] === 'library') return { page: 'library', activeId: null, knowledgeTab: 'docs' }
+  if (parts[0] === 'knowledge') {
+    return {
+      page: 'knowledge',
+      activeId: null,
+      knowledgeTab: parts[1] === 'rectify' ? 'rectify' : 'docs',
+    }
+  }
+  if (parts[0] === 'insights') return { page: 'insights', activeId: null, knowledgeTab: 'docs' }
+  return { page: 'dashboard', activeId: null, knowledgeTab: 'docs' }
+}
+
+function writeHashRoute(page: Page, activeId: string | null, knowledgeTab: 'docs' | 'rectify' = 'docs') {
+  let next = '#/dashboard'
+  if (page === 'review') next = activeId ? `#/review/${activeId}` : '#/review/new'
+  else if (page === 'library') next = '#/library'
+  else if (page === 'knowledge') next = knowledgeTab === 'rectify' ? '#/knowledge/rectify' : '#/knowledge'
+  else if (page === 'insights') next = '#/insights'
+  if (window.location.hash !== next) {
+    window.location.hash = next
+  }
+}
 
 const paths: Record<IconName, ReactNode> = {
   user: (
@@ -117,7 +156,19 @@ function Icon({ name, className = '' }: { name: IconName; className?: string }) 
   )
 }
 
-function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) => void }) {
+function Sidebar({
+  page,
+  user,
+  onNavigate,
+  onOpenAuth,
+  onSignOut,
+}: {
+  page: Page
+  user: AuthUser
+  onNavigate: (page: Page) => void
+  onOpenAuth: () => void
+  onSignOut: () => void
+}) {
   const nav: { label: string; icon: IconName; target: Page }[] = [
     { label: 'Dashboard', icon: 'home', target: 'dashboard' },
     { label: 'Brand Knowledge', icon: 'book', target: 'knowledge' },
@@ -132,9 +183,9 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
         <span>Inkloom AI</span>
       </div>
       <div className="workspace">
-        <span className="eyebrow">Workspace</span>
+        <span className="eyebrow">Active Brand</span>
         <div>
-          Your workspace <Icon name="chevron" />
+          {user.org_name} <Icon name="chevron" />
         </div>
       </div>
       <nav aria-label="Main navigation">
@@ -151,15 +202,52 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
           </button>
         ))}
       </nav>
+
+      <div className="sidebar-bottom">
+        <div className="profile">
+          <div className="avatar" aria-hidden="true">
+            {user.name
+              .split(' ')
+              .map(n => n[0])
+              .slice(0, 2)
+              .join('')
+              .toUpperCase()}
+          </div>
+          <div className="profile-meta">
+            <strong>{user.name}</strong>
+            <span className={`sidebar-role-pill role-${user.role}`}>{ROLE_LABELS[user.role]}</span>
+          </div>
+        </div>
+        <div className="sidebar-auth-actions">
+          <button type="button" className="sidebar-mini-btn" onClick={onOpenAuth}>
+            Switch account
+          </button>
+          <button type="button" className="sidebar-mini-btn ghost" onClick={onSignOut}>
+            Sign out
+          </button>
+        </div>
+      </div>
     </aside>
   )
 }
 
-function Header({ page, hasActiveReview, onSearch }: { page: Page; hasActiveReview: boolean; onSearch: () => void }) {
+function Header({
+  page,
+  hasActiveReview,
+  user,
+  onSearch,
+  onOpenAuth,
+}: {
+  page: Page
+  hasActiveReview: boolean
+  user: AuthUser
+  onSearch: () => void
+  onOpenAuth: () => void
+}) {
   return (
     <header className="topbar">
       <div className="eyebrow">
-        Workspace <span>/</span>{' '}
+        {user.brand_name} <span>/</span>{' '}
         {page === 'dashboard'
           ? 'Overview'
           : page === 'library'
@@ -173,7 +261,17 @@ function Header({ page, hasActiveReview, onSearch }: { page: Page; hasActiveRevi
           : 'New Review'}
       </div>
       <div className="top-actions">
-        <button type="button" className="header-icon search-trigger" onClick={onSearch} aria-label="Search workspace" aria-keyshortcuts="Control+K Meta+K">
+        <button type="button" className="header-role-pill" onClick={onOpenAuth} title="Switch organisation or role">
+          <Icon name="user" />
+          <span>{user.name} · {ROLE_LABELS[user.role]}</span>
+        </button>
+        <button
+          type="button"
+          className="header-icon search-trigger"
+          onClick={onSearch}
+          aria-label="Search workspace"
+          aria-keyshortcuts="Control+K Meta+K"
+        >
           <Icon name="search" />
         </button>
       </div>
@@ -181,7 +279,7 @@ function Header({ page, hasActiveReview, onSearch }: { page: Page; hasActiveRevi
   )
 }
 
-function Hero({ onStart, onLibrary }: { onStart: () => void; onLibrary: () => void }) {
+function Hero({ onStart, onLibrary, brandName }: { onStart: () => void; onLibrary: () => void; brandName: string }) {
   return (
     <section className="hero">
       <div className="hero-copy">
@@ -190,12 +288,14 @@ function Hero({ onStart, onLibrary }: { onStart: () => void; onLibrary: () => vo
           <br />
           the spotlight.
         </h1>
-        <p>Review your content. See the evidence. Keep the final say.</p>
+        <p>
+          Verify drafts against <strong>{brandName}</strong> guidelines and live evidence — with human sign-off on every release.
+        </p>
         <div className="hero-actions">
-          <button className="primary-button" onClick={onStart}>
+          <button type="button" className="primary-button" onClick={onStart}>
             Start a review <Icon name="arrow" />
           </button>
-          <button className="hero-library-link" onClick={onLibrary}>
+          <button type="button" className="hero-library-link" onClick={onLibrary}>
             Open review library
           </button>
         </div>
@@ -225,7 +325,7 @@ function StatusSummary({ submissions }: { submissions: SubmissionSummary[] }) {
   return (
     <section className="summary" aria-label="Review status summary">
       {items.map(item => (
-        <div className="summary-item" key={item.label}>
+        <div className="summary-item stagger-card" key={item.label}>
           <Icon name={item.icon} className={item.tone} />
           <strong>{String(item.count).padStart(2, '0')}</strong>
           <span>{item.label}</span>
@@ -236,23 +336,65 @@ function StatusSummary({ submissions }: { submissions: SubmissionSummary[] }) {
 }
 
 function App() {
+  const initial = parseHashRoute()
+  const [user, setUser] = useState<AuthUser | null>(() => getStoredUser())
+  const [authModalOpen, setAuthModalOpen] = useState(false)
   const [submissions, setSubmissions] = useState<SubmissionSummary[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [page, setPage] = useState<Page>('dashboard')
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const [page, setPage] = useState<Page>(initial.page)
+  const [activeId, setActiveId] = useState<string | null>(initial.activeId)
+  const [knowledgeTab, setKnowledgeTab] = useState<'docs' | 'rectify'>(initial.knowledgeTab)
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
   const [focusKnowledgeUpload, setFocusKnowledgeUpload] = useState(false)
 
+  // Verify stored token on startup
+  useEffect(() => {
+    const tok = getStoredToken()
+    if (!tok) return
+    let mounted = true
+    void serverApi
+      .me()
+      .then(verified => {
+        if (mounted) setUser(verified)
+      })
+      .catch(() => {
+        clearAuthSession()
+        if (mounted) setUser(null)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  // Sync URL hash changes (supports browser back/forward & page refresh on saved reviews)
+  useEffect(() => {
+    const onHash = () => {
+      const parsed = parseHashRoute()
+      setPage(parsed.page)
+      setActiveId(parsed.activeId)
+      setKnowledgeTab(parsed.knowledgeTab)
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setSearchOpen(true) }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setSearchOpen(true)
+      }
     }
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
   }, [])
 
   const fetchSubmissions = useCallback(async () => {
+    if (!getStoredToken()) {
+      setSubmissions([])
+      return
+    }
     try {
       const list = await serverApi.list()
       setSubmissions(list)
@@ -263,12 +405,19 @@ function App() {
   }, [])
 
   useEffect(() => {
-    void fetchSubmissions()
-  }, [fetchSubmissions])
+    const timer = window.setTimeout(() => {
+      void fetchSubmissions()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [fetchSubmissions, user?.user_id, user?.org_id])
 
-  function navigate(next: Page) {
-    if (next === 'knowledge') setSelectedDocument(null)
+  function navigate(next: Page, nextKnowledgeTab: 'docs' | 'rectify' = 'docs') {
+    if (next === 'knowledge') {
+      setSelectedDocument(null)
+      setKnowledgeTab(nextKnowledgeTab)
+    }
     setFocusKnowledgeUpload(false)
+    const nextActiveId = next === 'review' ? null : activeId
     if (next === 'review') {
       setActiveId(null)
     }
@@ -276,68 +425,165 @@ function App() {
       void fetchSubmissions()
     }
     setPage(next)
+    writeHashRoute(next, next === 'review' ? null : nextActiveId, nextKnowledgeTab)
   }
 
   function open(id: string) {
     setActiveId(id)
     setPage('review')
+    writeHashRoute('review', id)
+  }
+
+  function handleAuthenticated(nextUser: AuthUser) {
+    const orgChanged = user && user.org_id !== nextUser.org_id
+    setUser(nextUser)
+    setError(null)
+    if (orgChanged) {
+      setActiveId(null)
+      if (page === 'review') {
+        setPage('library')
+        writeHashRoute('library', null)
+      }
+    }
+    void fetchSubmissions()
+  }
+
+  function handleSignOut() {
+    clearAuthSession()
+    setUser(null)
+    setSubmissions([])
+    setActiveId(null)
+  }
+
+  if (!user) {
+    return (
+      <div className="app auth-gate" id="dashboard">
+        <AuthModal inline currentUser={null} onAuthenticated={handleAuthenticated} />
+      </div>
+    )
   }
 
   return (
     <div className="app" id="dashboard">
-      <Sidebar page={page} onNavigate={navigate} />
+      <Sidebar
+        page={page}
+        user={user}
+        onNavigate={next => navigate(next)}
+        onOpenAuth={() => setAuthModalOpen(true)}
+        onSignOut={handleSignOut}
+      />
       <main className="main">
-        <Header page={page} hasActiveReview={Boolean(activeId)} onSearch={() => setSearchOpen(true)} />
+        <Header
+          page={page}
+          hasActiveReview={Boolean(activeId)}
+          user={user}
+          onSearch={() => setSearchOpen(true)}
+          onOpenAuth={() => setAuthModalOpen(true)}
+        />
         {error && (
           <div className="storage-error" role="alert" style={{ margin: '16px 25px 0' }}>
             {error}
           </div>
         )}
-        {page === 'knowledge' ? (
-          <BrandKnowledge key={selectedDocument || 'all'} initialSelectedId={selectedDocument} focusUpload={focusKnowledgeUpload} />
-        ) : page === 'insights' ? (
-          <Insights />
-        ) : page === 'library' ? (
-          <ReviewLibrary
-            onOpen={open}
-            onNew={() => {
-              setActiveId(null)
-              setPage('review')
-            }}
-          />
-        ) : page === 'review' ? (
-          activeId ? (
-            <ReviewWorkspace
-              submissionId={activeId}
-              onReturn={() => {
-                setActiveId(null)
-                setPage('library')
-                void fetchSubmissions()
-              }}
-              onNewReview={() => {
+        <div key={`${page}-${activeId || 'new'}-${user.org_id}`} className="page-enter">
+          {page === 'knowledge' ? (
+            <BrandKnowledge
+              key={`${user.org_id}-${selectedDocument || 'all'}-${knowledgeTab}`}
+              user={user}
+              initialSelectedId={selectedDocument}
+              initialTab={knowledgeTab}
+              focusUpload={focusKnowledgeUpload}
+              onSwitchAccount={() => setAuthModalOpen(true)}
+            />
+          ) : page === 'insights' ? (
+            <Insights
+              user={user}
+              onOpenRectification={() => navigate('knowledge', 'rectify')}
+            />
+          ) : page === 'library' ? (
+            <ReviewLibrary
+              onOpen={open}
+              onNew={() => {
                 setActiveId(null)
                 setPage('review')
+                writeHashRoute('review', null)
               }}
-              onRefreshList={fetchSubmissions}
             />
+          ) : page === 'review' ? (
+            activeId ? (
+              <ReviewWorkspace
+                submissionId={activeId}
+                user={user}
+                onSwitchAccount={() => setAuthModalOpen(true)}
+                onReturn={() => {
+                  setActiveId(null)
+                  setPage('library')
+                  writeHashRoute('library', null)
+                  void fetchSubmissions()
+                }}
+                onNewReview={() => {
+                  setActiveId(null)
+                  setPage('review')
+                  writeHashRoute('review', null)
+                }}
+                onRefreshList={fetchSubmissions}
+              />
+            ) : (
+              <NewReview
+                user={user}
+                onSwitchAccount={() => setAuthModalOpen(true)}
+                onCreated={id => {
+                  setActiveId(id)
+                  setPage('review')
+                  writeHashRoute('review', id)
+                  void fetchSubmissions()
+                }}
+              />
+            )
           ) : (
-            <NewReview
-              onCreated={id => {
-                setActiveId(id)
-                setPage('review')
-                void fetchSubmissions()
-              }}
-            />
-          )
-        ) : (
-          <>
-            <Hero onStart={() => navigate('review')} onLibrary={() => navigate('library')} />
-            <StatusSummary submissions={submissions} />
-            <div className="dashboard-grid"><ReviewWorkflow onGuidelines={() => { navigate('knowledge'); setFocusKnowledgeUpload(true) }} onContent={() => navigate('review')} onLibrary={() => navigate('library')} /></div>
-          </>
-        )}
+            <>
+              <Hero
+                brandName={user.brand_name}
+                onStart={() => navigate('review')}
+                onLibrary={() => navigate('library')}
+              />
+              <StatusSummary submissions={submissions} />
+              <div className="dashboard-grid">
+                <ReviewWorkflow
+                  onGuidelines={() => {
+                    navigate('knowledge')
+                    setFocusKnowledgeUpload(true)
+                  }}
+                  onContent={() => navigate('review')}
+                  onLibrary={() => navigate('library')}
+                />
+              </div>
+            </>
+          )}
+        </div>
       </main>
-      {searchOpen && <GlobalSearch onClose={() => setSearchOpen(false)} onReview={id => { setSearchOpen(false); open(id) }} onDocument={id => { setSearchOpen(false); setSelectedDocument(id); setPage('knowledge') }} />}
+      {searchOpen && (
+        <GlobalSearch
+          onClose={() => setSearchOpen(false)}
+          onReview={id => {
+            setSearchOpen(false)
+            open(id)
+          }}
+          onDocument={id => {
+            setSearchOpen(false)
+            setSelectedDocument(id)
+            setPage('knowledge')
+            writeHashRoute('knowledge', null)
+          }}
+        />
+      )}
+      {authModalOpen && (
+        <AuthModal
+          currentUser={user}
+          onAuthenticated={handleAuthenticated}
+          onClose={() => setAuthModalOpen(false)}
+        />
+      )}
     </div>
   )
 }

@@ -7,6 +7,7 @@ Enforces zero-hallucination guardrails, checks source freshness, recency,
 and conflicting evidence, and escalates to human review when uncertain.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
 import re
@@ -27,6 +28,7 @@ from app.models import (
     ExternalSource,
     FlagDraft,
     FlaggedSpan,
+    GuidelineRef,
     SuggestionDetails,
 )
 from app.uncertainty import needs_human
@@ -34,14 +36,16 @@ from app.uncertainty import needs_human
 logger = logging.getLogger(__name__)
 
 CLAIM_SYSTEM_INSTRUCTION = """You are the Senior Fact-Checking and Claim Verification Specialist for Inkloom AI.
-Your responsibility is to verify factual, statistical, comparative, and guarantee claims against retrieved external evidence.
+Your responsibility is to verify factual, statistical, comparative, and guarantee claims against APPROVED INTERNAL BRAND FACTS first, and retrieved external evidence second.
 
 CRITICAL OPERATIONAL RULES:
-1. STRICT EVIDENCE GROUNDING: You must ONLY evaluate claims using the provided retrieved external evidence. NEVER invent sources, URLs, quotes, or statistics.
+0. APPROVED BRAND FACTS PRIORITY: If approved internal brand guidelines or product fact sheets explicitly substantiate a claim about the organisation's own product, pricing, ingredients, SLA, or history, mark state='supported' and cite the approved brand source. NEVER overwrite or contradict verified internal brand facts using unrelated third-party sites.
+0b. UNRELATED COMPANY EXCLUSION: NEVER use websites belonging to a different company or unrelated brand (even if they share a keyword) to verify or contradict claims about the active brand. If external search only returned unrelated companies or empty/unavailable pages, classify as 'insufficient_evidence' with an explicit uncertainty_note.
+1. STRICT EVIDENCE GROUNDING: You must ONLY evaluate claims using the provided approved brand facts and retrieved external evidence. NEVER invent sources, URLs, quotes, or statistics.
 2. VERDICT CLASSIFICATION:
-   - 'supported': Authoritative retrieved evidence directly substantiates and confirms the claim.
-   - 'contradicted': Retrieved evidence directly refutes, disproves, or contradicts the statement.
-   - 'insufficient_evidence': Evidence is absent, incomplete, outdated, conflicting/disputed, or unable to prove absolute superlatives (e.g. '#1', 'world's best', '100% guarantee').
+   - 'supported': Approved internal brand facts OR authoritative retrieved external evidence directly substantiates the claim.
+   - 'contradicted': Verified evidence for THIS SAME entity/product directly refutes or contradicts the statement.
+   - 'insufficient_evidence': Evidence is absent, incomplete, outdated, conflicting/disputed, from an unrelated company, or unable to prove absolute superlatives (e.g. '#1', 'world's best', '100% guarantee').
 3. CONFLICTING EVIDENCE RULE: When multiple reliable sources present conflicting or contradictory findings, DO NOT classify the claim as definitively contradicted. Instead, classify as 'insufficient_evidence', set evidence_quality='conflicting', and supply an explicit uncertainty_note noting the disagreement for human review.
 4. CONTEXTUAL FRESHNESS EVALUATION:
    - For fast-moving performance, speed, latency, SLA, or current market share claims: evidence must be contemporary. Older reports must be classified as 'outdated' and evaluated as 'insufficient_evidence'.
@@ -50,10 +54,11 @@ CRITICAL OPERATIONAL RULES:
    - Check source domains, publication dates, and excerpts.
    - If source metadata or excerpts are missing or unavailable, assign evidence_quality='insufficient'. Never invent reliability when metadata is absent.
 6. UNCERTAINTY ESCALATION: When evidence is ambiguous, partial, or conflicting, supply an explicit 'uncertainty_note' explaining the gap so human reviewers can intervene.
-7. EXPLANATIONS & WHY IT MATTERS:
+7. EXPLANATIONS & NO INVENTED CORRECTIONS:
    - Provide an objective plain-language explanation of how the evidence supports or contradicts the claim.
    - Explain 'why_it_matters' from a legal, advertising standard, or commercial risk perspective.
-   - For non-supported claims, provide an intent-preserving 'suggested_fix' (e.g. softening superlatives to verified claims).
+   - When state='supported', suggested_fix MUST be null.
+   - For non-supported claims, ONLY provide a minimal intent-preserving 'suggested_fix' if it softens an unverified superlative without inventing new facts or product descriptions; otherwise leave suggested_fix=null so a human author edits it.
 
 Always return strictly valid JSON matching the ClaimVerificationOutput schema."""
 
@@ -136,23 +141,38 @@ def validate_and_ground_claim_findings(
     return grounded_findings
 
 
+def _match_claim_to_internal_facts(
+    claim_text: str,
+    guidelines: Optional[List[GuidelineRef]],
+) -> List[GuidelineRef]:
+    """Check whether retrieved approved brand guidelines/facts directly substantiate or cover a claim."""
+    if not guidelines or not claim_text:
+        return []
+    claim_tokens = {
+        t for t in re.findall(r"[a-z0-9%]{3,}", claim_text.lower())
+        if t not in {"the", "and", "for", "with", "our", "that", "this", "from", "are"}
+    }
+    if not claim_tokens:
+        return []
+    matched: List[GuidelineRef] = []
+    for g in guidelines:
+        exc_tokens = set(re.findall(r"[a-z0-9%]{3,}", (g.excerpt or "").lower()))
+        overlap = claim_tokens.intersection(exc_tokens)
+        is_fact_doc = (g.category or "") in ("approved_fact", "fact") or (g.match_type or "") == "approved_fact"
+        if len(overlap) >= 2 or (is_fact_doc and len(overlap) >= 1):
+            matched.append(g)
+    return matched
+
+
 def verify_claims_against_evidence(
     claims: List[ExtractedClaim],
     evidence_map: Optional[Dict[str, List[Any]]] = None,
     client: Optional[GeminiClient] = None,
     auto_fetch_evidence: bool = True,
+    guidelines: Optional[List[GuidelineRef]] = None,
+    brand_name: Optional[str] = None,
 ) -> ClaimVerificationOutput:
-    """Evaluate extracted factual claims against external evidence retrieved via Ken's interface.
-
-    Args:
-        claims: List of ExtractedClaim items (from Content Understanding).
-        evidence_map: Optional mapping of claim_id/text -> List of ExternalEvidenceItem.
-        client: Optional GeminiClient instance.
-        auto_fetch_evidence: If True and evidence_map is missing, calls Ken's retrieval interface.
-
-    Returns:
-        ClaimVerificationOutput containing claim-by-claim verification findings.
-    """
+    """Evaluate extracted factual claims against approved internal brand facts first, then external evidence."""
     ai_client = client or GeminiClient(settings=Settings())
 
     if not claims:
@@ -167,16 +187,40 @@ def verify_claims_against_evidence(
     resolved_evidence: Dict[str, List[Any]] = dict(evidence_map or {})
     all_evidence_items: List[Any] = []
 
-    # If evidence was not pre-supplied, use Ken's retrieval interface to fetch live/mock evidence
+    # Check which claims are already covered by internal approved brand facts
+    internal_fact_matches: Dict[str, List[GuidelineRef]] = {
+        c.claim_id: _match_claim_to_internal_facts(c.text, guidelines)
+        for c in target_claims
+    }
+
+    # Fetch external evidence concurrently for claims that need external substantiation
     if auto_fetch_evidence and not evidence_map:
         try:
+            import inspect
             from retrieval.external_search import verify_claim_externally
 
-            for c in target_claims[:4]:  # Budget to top 4 claims
-                query = c.text
-                items = verify_claim_externally(query, max_sources=3)
-                resolved_evidence[c.claim_id] = items
-                all_evidence_items.extend(items)
+            sig = inspect.signature(verify_claim_externally)
+            supports_brand = "brand_name" in sig.parameters
+
+            def _fetch_one(q: str):
+                if supports_brand:
+                    return verify_claim_externally(q, max_sources=3, brand_name=brand_name)
+                return verify_claim_externally(q, max_sources=3)
+
+            claims_to_fetch = [c for c in target_claims[:4]]
+            if claims_to_fetch:
+                with ThreadPoolExecutor(max_workers=min(3, len(claims_to_fetch))) as pool:
+                    futures = {
+                        c.claim_id: pool.submit(_fetch_one, c.text)
+                        for c in claims_to_fetch
+                    }
+                    for cid, fut in futures.items():
+                        try:
+                            items = fut.result(timeout=15)
+                            resolved_evidence[cid] = items
+                            all_evidence_items.extend(items)
+                        except Exception as inner_exc:
+                            logger.warning("External search failed for claim %s: %s", cid, inner_exc)
         except Exception as exc:
             logger.warning("Ken's external search invocation failed: %s", exc)
 
@@ -189,17 +233,35 @@ def verify_claims_against_evidence(
         if ClaimVerificationOutput in ai_client._mock_handlers:
             output = ai_client.generate_structured(prompt="", response_schema=ClaimVerificationOutput)
         else:
-            output = _generate_mock_claim_verification(target_claims, resolved_evidence)
+            output = _generate_mock_claim_verification(
+                target_claims,
+                resolved_evidence,
+                internal_fact_matches=internal_fact_matches,
+            )
         output.findings = validate_and_ground_claim_findings(output.findings, all_evidence_items)
         return output
 
     # 2. Live Gemini Execution
-    # Format claims and evidence into structured verification prompt
+    brand_facts_context = ""
+    if guidelines:
+        brand_facts_context = (
+            "APPROVED INTERNAL BRAND GUIDELINES & FACTS"
+            + (f" (Active Brand: {brand_name})" if brand_name else "")
+            + ":\n"
+            + "\n".join(
+                f"  - [{g.document} | {g.passage_ref}] \"{g.excerpt[:400]}\""
+                for g in guidelines[:6]
+            )
+            + "\n\n"
+        )
+
     prompt_sections = []
     for idx, c in enumerate(target_claims):
         ev_items = resolved_evidence.get(c.claim_id) or resolved_evidence.get(c.text) or []
-        ev_text = "No external evidence retrieved."
-        if ev_items:
+        usable_ev = [e for e in ev_items if getattr(e, "entity_matched", True) is not False]
+        rejected_ev = [e for e in ev_items if getattr(e, "entity_matched", True) is False]
+        ev_text = "No relevant external evidence retrieved."
+        if usable_ev:
             ev_text = "\n".join(
                 [
                     f"  - Source URL: {getattr(e, 'url', 'N/A')}\n"
@@ -208,9 +270,11 @@ def verify_claims_against_evidence(
                     f"    Published: {getattr(e, 'published_date', 'Unknown')}\n"
                     f"    Status: {getattr(e, 'status', 'ok')}\n"
                     f"    Excerpt: \"{getattr(e, 'excerpt', '')[:500]}\""
-                    for e in ev_items
+                    for e in usable_ev
                 ]
             )
+        if rejected_ev:
+            ev_text += f"\n  (Excluded {len(rejected_ev)} unrelated-company/off-topic search results.)"
 
         prompt_sections.append(
             f"CLAIM {idx+1} (ID: {c.claim_id}):\n"
@@ -221,11 +285,13 @@ def verify_claims_against_evidence(
         )
 
     full_prompt = (
-        "Evaluate the following draft claims against the retrieved external evidence.\n\n"
+        f"{brand_facts_context}"
+        "Evaluate the following draft claims. Prioritise APPROVED INTERNAL BRAND FACTS for claims about "
+        f"{brand_name or 'the organisation'}, and reject unrelated companies in external search results.\n\n"
         + "\n---\n".join(prompt_sections)
         + "\n\nFor each claim, determine state ('supported', 'contradicted', 'insufficient_evidence'), "
-        "cite specific evidence URLs, assess evidence quality, explain the verdict, "
-        "and provide uncertainty notes where evidence is incomplete, outdated, or conflicting."
+        "cite specific evidence URLs if externally grounded, assess evidence quality, explain the verdict, "
+        "set suggested_fix=null when supported, and never invent new product facts or descriptions."
     )
 
     output = ai_client.generate_structured(
@@ -234,8 +300,11 @@ def verify_claims_against_evidence(
         system_instruction=CLAIM_SYSTEM_INSTRUCTION,
     )
 
-    # Post-validation: ground findings against authoritative evidence
+    # Post-validation: ground findings against authoritative evidence and enforce supported -> no fix
     output.findings = validate_and_ground_claim_findings(output.findings, all_evidence_items)
+    for f in output.findings:
+        if f.state == "supported":
+            f.suggested_fix = None
     return output
 
 
@@ -243,11 +312,15 @@ def verify_claims(
     content: Union[ContentPayload, str, ContentUnderstandingOutput],
     evidence_map: Optional[Dict[str, List[Any]]] = None,
     client: Optional[GeminiClient] = None,
+    guidelines: Optional[List[GuidelineRef]] = None,
+    brand_name: Optional[str] = None,
 ) -> ClaimVerificationOutput:
     """High-level entry point accepting ContentPayload, text string, or ContentUnderstandingOutput."""
+    active_brand = brand_name
     if isinstance(content, ContentUnderstandingOutput):
         claims = content.claims
     elif isinstance(content, ContentPayload):
+        active_brand = active_brand or getattr(content, "brand_name", None)
         cu = understand_content(content, client=client)
         claims = cu.claims
     elif isinstance(content, str):
@@ -262,6 +335,8 @@ def verify_claims(
         evidence_map=evidence_map,
         client=client,
         auto_fetch_evidence=True,
+        guidelines=guidelines,
+        brand_name=active_brand,
     )
 
 
@@ -387,6 +462,7 @@ def _evaluate_contextual_freshness(claim_text: str, published_date: Optional[str
 def _generate_mock_claim_verification(
     claims: List[ExtractedClaim],
     evidence_map: Dict[str, List[Any]],
+    internal_fact_matches: Optional[Dict[str, List[GuidelineRef]]] = None,
 ) -> ClaimVerificationOutput:
     """Generate realistic, evidence-grounded mock claim findings for offline testing."""
     findings: List[ClaimFinding] = []
@@ -394,6 +470,28 @@ def _generate_mock_claim_verification(
     for c in claims:
         text = c.text.lower()
         ev_items = evidence_map.get(c.claim_id) or evidence_map.get(c.text) or []
+        int_facts = (internal_fact_matches or {}).get(c.claim_id) or []
+
+        # Priority 0: Approved internal brand fact substantiates this claim directly
+        if int_facts and not any(w in text for w in ("best in the world", "#1", "world's leading")):
+            fact_ref = int_facts[0]
+            findings.append(
+                ClaimFinding(
+                    claim_text=c.text,
+                    passage=c.passage,
+                    location=c.location,
+                    state="supported",
+                    explanation=f"Claim aligns with approved brand document '{fact_ref.document}' ({fact_ref.passage_ref}).",
+                    why_it_matters="Approved internal brand facts take precedence over unverified third-party web pages.",
+                    evidence_source_url=None,
+                    evidence_excerpt=fact_ref.excerpt[:400],
+                    evidence_quality="reliable",
+                    uncertainty_note=None,
+                    suggested_fix=None,
+                    external_sources=[],
+                )
+            )
+            continue
 
         # Case 1: Pre-supplied evidence check
         if ev_items:
@@ -403,6 +501,27 @@ def _generate_mock_claim_verification(
             pub_date = getattr(first_ev, "published_date", None)
             domain = getattr(first_ev, "domain", "")
             status = getattr(first_ev, "status", "ok")
+            entity_matched = getattr(first_ev, "entity_matched", True)
+            rejected_reason = getattr(first_ev, "rejected_reason", None)
+
+            if entity_matched is False or (rejected_reason and "unrelated_company" in rejected_reason):
+                findings.append(
+                    ClaimFinding(
+                        claim_text=c.text,
+                        passage=c.passage,
+                        location=c.location,
+                        state="insufficient_evidence",
+                        explanation="External search returned unrelated company websites that were excluded from verification.",
+                        why_it_matters="Evaluating a brand using another company's website creates false claims and compliance errors.",
+                        evidence_source_url=None,
+                        evidence_excerpt=None,
+                        evidence_quality="insufficient",
+                        uncertainty_note="Unrelated organisation sources rejected; human verification or approved brand fact required.",
+                        suggested_fix=None,
+                        external_sources=[],
+                    )
+                )
+                continue
 
             # Check if source status was unavailable or empty
             if status == "unavailable" or not excerpt.strip():

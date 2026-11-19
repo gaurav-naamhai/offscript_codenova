@@ -142,6 +142,52 @@ def check_entity_preservation(
     return all_preserved, preserved, missing
 
 
+def validate_no_invented_facts(
+    original_passage: str,
+    suggested_replacement: str,
+    guidelines: Optional[List[GuidelineRef]] = None,
+    evidence_map: Optional[Dict[str, List[Any]]] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Reject candidate suggestions that invent numbers, prices, specs, entities, or bloated product descriptions."""
+    orig = (original_passage or "").strip()
+    cand = (suggested_replacement or "").strip()
+    if not cand or cand == orig:
+        return True, None
+
+    # Build grounded corpus from original passage, guidelines, and retrieved external excerpts
+    grounded_corpus_parts = [orig.lower()]
+    if guidelines:
+        for g in guidelines:
+            grounded_corpus_parts.append((g.excerpt or "").lower())
+            grounded_corpus_parts.append((g.document or "").lower())
+    if evidence_map:
+        for items in evidence_map.values():
+            for it in items:
+                grounded_corpus_parts.append((getattr(it, "excerpt", "") or "").lower())
+                grounded_corpus_parts.append((getattr(it, "title", "") or "").lower())
+    grounded_corpus = " ".join(grounded_corpus_parts)
+
+    # 1. Prevent invented quantitative/numeric specs (percentages, dollars, numbers with units, years)
+    num_tokens = re.findall(r"\b\d+(?:\.\d+)?%|\$\d+(?:,\d+)*(?:\.\d+)?|\b\d+(?:\.\d+)?\s*(?:x|ms|hrs|hours|days|years|mg|g|kg|gb|tb)\b", cand, re.IGNORECASE)
+    for tok in num_tokens:
+        norm_tok = re.sub(r"\s+", "", tok.lower())
+        norm_corpus = re.sub(r"\s+", "", grounded_corpus)
+        if norm_tok not in norm_corpus:
+            return False, f"Anti-fabrication guard: suggestion invented unverified numeric metric '{tok}'."
+
+    # 2. Prevent invented multi-word proper names / product names not in source/guidelines
+    cand_entities = re.findall(r"\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)+\b", cand)
+    for ent in cand_entities:
+        if ent.lower() not in grounded_corpus:
+            return False, f"Anti-fabrication guard: suggestion introduced unverified entity '{ent}'."
+
+    # 3. Prevent overly expansive fabricated product descriptions (>2.4x original length AND >140 extra chars)
+    if orig and len(cand) > max(int(len(orig) * 2.4), len(orig) + 140):
+        return False, "Anti-fabrication guard: suggestion expanded significantly beyond minimal intent-preserving scope."
+
+    return True, None
+
+
 # ============================================================================
 # PROGRAMMATIC RECHECK ENGINE
 # ============================================================================
@@ -185,6 +231,16 @@ def recheck_correction(
     # 3. Check for empty replacement
     if not suggested_replacement.strip():
         return False, "Recheck failed: Suggested replacement is empty."
+
+    # 3b. Anti-fabrication / no-invented-facts check
+    no_invented, fab_reason = validate_no_invented_facts(
+        original_passage=original_passage,
+        suggested_replacement=suggested_replacement,
+        guidelines=guidelines or ([guideline_ref] if guideline_ref else None),
+        evidence_map=evidence_map,
+    )
+    if not no_invented:
+        return False, fab_reason or "Recheck failed: Suggested replacement introduced unverified facts."
 
     # 4. Syntactic safety check for obvious unverified superlatives or guarantees
     replacement_lower = suggested_replacement.lower()
@@ -405,6 +461,13 @@ def generate_correction(
         evidence_map=evidence_map,
         client=ai_client,
     )
+
+    if not passed and notes and "Anti-fabrication guard" in notes:
+        # Never surface invented product descriptions or fabricated metrics as a suggested replacement
+        candidate.suggested_replacement = passage
+        candidate.change_rationale = (
+            f"{notes} Retaining original passage so a human editor can revise safely."
+        )
 
     candidate.flag_id = flag_id
     candidate.original_passage = passage

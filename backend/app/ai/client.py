@@ -84,7 +84,7 @@ class GeminiClient:
 
         self.model = model or cfg.gemini_model or "gemini-3.5-flash-lite"
 
-        raw_key = api_key or cfg.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+        raw_key = api_key if api_key is not None else (cfg.gemini_api_key or os.getenv("GEMINI_API_KEY", ""))
         self._api_key = raw_key.strip() if raw_key else ""
 
         # Custom mock response handlers (schema_type -> callable or instance)
@@ -215,37 +215,56 @@ class GeminiClient:
         contents.append(prompt)
 
         try:
-            max_attempts = 3
+            fallback_models = ("gemini-2.5-flash", "gemini-2.0-flash")
+            models_to_try = [self.model] + [m for m in fallback_models if m != self.model]
             response = None
-            for attempt in range(1, max_attempts + 1):
+            for model_idx, active_model in enumerate(models_to_try):
                 try:
-                    response = self._client.models.generate_content(
-                        model=self.model,
-                        contents=contents,
-                        config=config,
-                    )
+                    max_attempts = 3
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            response = self._client.models.generate_content(
+                                model=active_model,
+                                contents=contents,
+                                config=config,
+                            )
+                            break
+                        except Exception as exc:
+                            code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+                            if code is None and hasattr(exc, "response"):
+                                code = getattr(exc.response, "status_code", None) or getattr(exc.response, "status", None)
+                            try:
+                                code_int = int(code) if code is not None else None
+                            except (ValueError, TypeError):
+                                code_int = None
+                            msg = str(exc)
+                            is_server_error = (
+                                code_int in (500, 502, 503, 504)
+                                or bool(re.search(r"\b(500|502|503|504)\b", msg))
+                            )
+                            if is_server_error and attempt < max_attempts:
+                                logger.warning(
+                                    "Gemini API server error (attempt %d/%d): %s. Retrying in 1s...",
+                                    attempt,
+                                    max_attempts,
+                                    exc,
+                                )
+                                time.sleep(1)
+                                continue
+                            raise
+                    if active_model != self.model:
+                        self.model = active_model
                     break
-                except Exception as exc:
-                    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-                    if code is None and hasattr(exc, "response"):
-                        code = getattr(exc.response, "status_code", None) or getattr(exc.response, "status", None)
-                    try:
-                        code_int = int(code) if code is not None else None
-                    except (ValueError, TypeError):
-                        code_int = None
-                    msg = str(exc)
-                    is_server_error = (
-                        code_int in (500, 502, 503, 504)
-                        or bool(re.search(r"\b(500|502|503|504)\b", msg))
-                    )
-                    if is_server_error and attempt < max_attempts:
+                except Exception as model_exc:
+                    code = getattr(model_exc, "code", None) or getattr(model_exc, "status_code", None)
+                    msg_low = str(model_exc).lower()
+                    is_not_found = (code == 404) or ("404" in msg_low) or ("not found" in msg_low)
+                    if is_not_found and model_idx < len(models_to_try) - 1:
                         logger.warning(
-                            "Gemini API server error (attempt %d/%d): %s. Retrying in 1s...",
-                            attempt,
-                            max_attempts,
-                            exc,
+                            "Gemini model '%s' returned 404/not found; falling back to '%s'.",
+                            active_model,
+                            models_to_try[model_idx + 1],
                         )
-                        time.sleep(1)
                         continue
                     raise
 

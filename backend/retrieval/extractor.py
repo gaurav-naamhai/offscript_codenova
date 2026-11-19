@@ -12,29 +12,43 @@ logger = logging.getLogger(__name__)
 
 # Minimum character count on a PDF page before falling back to Gemini vision OCR
 MIN_DIGITAL_PAGE_CHARS = 25
+MAX_OCR_PAGES = 8
+FALLBACK_OCR_MODELS = ("gemini-2.5-flash", "gemini-2.0-flash")
 
 
 def _ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> str:
-    """Use Gemini multimodal (`gemini-3.5-flash-lite`) to extract text from an image."""
+    """Use Gemini multimodal with automatic model fallback to extract text from an image."""
+    models_to_try = [GEMINI_MODEL] + [m for m in FALLBACK_OCR_MODELS if m != GEMINI_MODEL]
     try:
         client = get_genai_client()
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                (
-                    "Extract all visible text from this image or scanned document page accurately. "
-                    "Preserve headings and paragraph breaks. Return ONLY the extracted text, with no extra commentary."
-                ),
-            ],
-            config=types.GenerateContentConfig(
-                http_options={"api_version": "v1beta"},
-            ),
-        )
-        return (response.text or "").strip()
     except Exception as exc:
-        logger.warning("Gemini OCR failed: %s", exc)
+        logger.warning("Gemini OCR client unavailable: %s", exc)
         return ""
+
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    (
+                        "Extract all visible text from this image or scanned document page accurately. "
+                        "Preserve headings and paragraph breaks. Return ONLY the extracted text, with no extra commentary."
+                    ),
+                ],
+                config=types.GenerateContentConfig(
+                    http_options={"api_version": "v1beta"},
+                ),
+            )
+            return (response.text or "").strip()
+        except Exception as exc:
+            msg = str(exc).lower()
+            if ("404" in msg or "not found" in msg) and model_name != models_to_try[-1]:
+                logger.warning("OCR model '%s' unavailable, trying fallback: %s", model_name, exc)
+                continue
+            logger.warning("Gemini OCR failed (%s): %s", model_name, exc)
+            return ""
+    return ""
 
 
 def extract_document(
@@ -45,7 +59,7 @@ def extract_document(
     """Extract text and page metadata from a PDF, image, or plain-text file.
 
     - Digital PDFs: extracted per page via PyMuPDF (`fitz`).
-    - Scanned PDF pages (little/no digital text): rendered to PNG and OCR'd via Gemini.
+    - Scanned PDF pages (little/no digital text): rendered to PNG and OCR'd via Gemini (up to MAX_OCR_PAGES).
     - Images (`png`, `jpg`, `jpeg`, `webp`): OCR'd via Gemini.
     """
     lower_name = (filename or "").lower()
@@ -54,6 +68,7 @@ def extract_document(
     # 1. PDF Handling
     if lower_name.endswith(".pdf") or mime == "application/pdf" or file_bytes[:4] == b"%PDF":
         pages: list[PageText] = []
+        ocr_pages_used = 0
         doc = pymupdf.open(stream=file_bytes, filetype="pdf")
         try:
             for idx, page in enumerate(doc):
@@ -67,9 +82,10 @@ def extract_document(
                             extraction_method="digital_pdf",
                         )
                     )
-                else:
-                    # Scanned page fallback -> render page at 150 DPI and run Gemini OCR
-                    pix = page.get_pixmap(dpi=150)
+                elif ocr_pages_used < MAX_OCR_PAGES:
+                    # Scanned page fallback -> render page at 130 DPI and run Gemini OCR
+                    ocr_pages_used += 1
+                    pix = page.get_pixmap(dpi=130)
                     png_bytes = pix.tobytes("png")
                     ocr_text = _ocr_image_bytes(png_bytes, mime_type="image/png")
                     pages.append(
@@ -77,6 +93,14 @@ def extract_document(
                             page_number=page_num,
                             text=ocr_text or raw_text,
                             extraction_method="ocr_gemini",
+                        )
+                    )
+                else:
+                    pages.append(
+                        PageText(
+                            page_number=page_num,
+                            text=raw_text,
+                            extraction_method="digital_pdf",
                         )
                     )
         finally:
@@ -130,6 +154,9 @@ def extract_document(
 
 def extract_from_payload(content: ContentPayload) -> str:
     """Helper to get usable text from Gaurav's `ContentPayload` (text, image, or PDF)."""
+    pre_extracted = getattr(content, "extracted_text", None)
+    if pre_extracted and pre_extracted.strip():
+        return pre_extracted.strip()
     if content.text and content.text.strip():
         return content.text.strip()
     if content.file_bytes:

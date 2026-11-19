@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { serverApi } from './serverApi'
-import type { RecurringInsights } from './serverApi'
+import type { AuthUser, RecurringInsights } from './serverApi'
 import './KnowledgeInsights.css'
 
-export default function Insights() {
+export default function Insights({
+  user,
+  onOpenRectification,
+}: {
+  user: AuthUser
+  onOpenRectification?: () => void
+}) {
   const [data, setData] = useState<RecurringInsights | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -22,27 +28,88 @@ export default function Insights() {
   }, [])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    const timer = window.setTimeout(() => {
+      void load()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [load, user.org_id])
+
+  const gov = data?.governance_insights
 
   return (
     <div className="insights-page">
       <header className="ki-heading">
         <h1>Insights.</h1>
-        <p>Live recurring compliance metrics across all evaluated content drafts.</p>
+        <p>
+          Recurring mistakes and guideline clarity trends for <strong>{user.brand_name}</strong>.
+        </p>
       </header>
-      <p className="ki-disclosure">Aggregated guideline violations and factual verification states across the submission pipeline.</p>
-      <button className="ki-retry" onClick={() => void load()} disabled={loading}>
-        {loading ? 'Refreshing...' : 'Refresh insights'}
-      </button>
-      {loading && <p role="status">Loading insights from compliance backend...</p>}
+
+      <div style={{ display: 'flex', gap: '10px', margin: '14px 0 18px', flexWrap: 'wrap' }}>
+        <button type="button" className="ki-retry" onClick={() => void load()} disabled={loading}>
+          {loading ? 'Refreshing…' : 'Refresh insights'}
+        </button>
+        {onOpenRectification && (
+          <button type="button" className="primary-button" onClick={onOpenRectification} style={{ padding: '9px 18px', fontSize: '14px' }}>
+            Open Guideline Rectification →
+          </button>
+        )}
+      </div>
+
+      {loading && <p role="status">Loading insights…</p>}
       {error && <p className="validation" role="alert">{error}</p>}
+
       {!loading && data && (
         <>
-          <div className="panel ki-total">
-            <span>Total compliance flags</span>
+          <div className="panel ki-total stagger-card">
+            <span>Total compliance flags evaluated ({user.brand_name})</span>
             <strong>{data.total_flags}</strong>
           </div>
+
+          {gov && (
+            <section className="panel ki-panel stagger-card" style={{ marginBottom: '16px' }}>
+              <span className="workspace-kicker">Governance Intelligence</span>
+              <h2 style={{ marginTop: '8px' }}>Executive summary</h2>
+              <p style={{ lineHeight: 1.55, margin: '0 0 14px' }}>{gov.summary_narrative}</p>
+
+              {gov.top_recurring_violations.length > 0 && (
+                <>
+                  <h3>Recurring mistake patterns</h3>
+                  <ul className="insight-list">
+                    {gov.top_recurring_violations.map((rv, idx) => (
+                      <li key={idx}>
+                        <div>
+                          <strong>{rv.rule_or_topic}</strong>
+                          <div style={{ fontSize: '13px', color: '#5f4841', marginTop: '2px' }}>{rv.recommendation}</div>
+                        </div>
+                        <strong>{rv.frequency}×</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+
+              {gov.ambiguous_guidelines.length > 0 && (
+                <>
+                  <h3>Rules causing repeated human escalations</h3>
+                  <ul className="insight-list">
+                    {gov.ambiguous_guidelines.map((ag, idx) => (
+                      <li key={idx}>
+                        <div>
+                          <strong>{ag.guideline_title}</strong>
+                          <div style={{ fontSize: '13px', color: '#5f4841', marginTop: '2px' }}>
+                            {ag.reason_for_ambiguity} Suggested fix: {ag.suggested_clarification}
+                          </div>
+                        </div>
+                        <strong>{ag.human_escalation_count} escalations</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
+
           <div className="insight-grid">
             <section className="panel ki-panel">
               <h2>Most violated guidelines</h2>
@@ -59,6 +126,7 @@ export default function Insights() {
                 <p>No recurring guidelines recorded yet.</p>
               )}
             </section>
+
             <section className="panel ki-panel">
               <h2>Assessment distributions</h2>
               {Object.keys(data.state_counts).length ? (
