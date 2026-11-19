@@ -578,20 +578,24 @@ export const serverApi = {
     return res.hints || []
   },
 
-  async resolve(id: string, flagId: string, action: 'accept' | 'dismiss', role: DemoRole = 'creator'): Promise<void> {
+  async resolve(id: string, flagId: string, action: 'accept' | 'dismiss', role?: DemoRole): Promise<void> {
+    const user = getStoredUser()
+    const effectiveRole = role || user?.role || 'creator'
     await request(`/submissions/${encodeURIComponent(id)}/flags/${encodeURIComponent(flagId)}/resolution`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, role }),
+      body: JSON.stringify({ action, role: effectiveRole }),
     })
   },
 
-  async recheck(id: string, flagId: string, role: DemoRole = 'creator'): Promise<RecheckResult> {
+  async recheck(id: string, flagId: string, role?: DemoRole): Promise<RecheckResult> {
+    const user = getStoredUser()
+    const effectiveRole = role || user?.role || 'creator'
     const result: unknown = await (
       await request(`/submissions/${encodeURIComponent(id)}/flags/${encodeURIComponent(flagId)}/recheck`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role }),
+        body: JSON.stringify({ role: effectiveRole }),
       })
     ).json()
     return result as RecheckResult

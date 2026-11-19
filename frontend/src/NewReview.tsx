@@ -176,8 +176,8 @@ export default function NewReview({
 
   async function submitForReview() {
     if (submitting.current) return
-    if (user.role !== 'creator') {
-      setErrors(['Only Creator accounts can submit new drafts. Switch to a Creator account to submit.'])
+    if (user.role !== 'creator' && user.role !== 'manager') {
+      setErrors(['Only Creator and Manager accounts can submit new drafts. Switch to an authorized account to submit.'])
       return
     }
     const next: string[] = []
@@ -226,9 +226,9 @@ export default function NewReview({
         </p>
       </header>
 
-      {user.role !== 'creator' && (
+      {user.role !== 'creator' && user.role !== 'manager' && (
         <div className="validation" role="status" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-          <span>Signed in as <strong>{user.role.replace('_', ' ')}</strong>. Only Creators can submit new drafts.</span>
+          <span>Signed in as <strong>{user.role.replace('_', ' ')}</strong>. Only Creators and Managers can submit new drafts.</span>
           <button type="button" className="outline-button" onClick={onSwitchAccount}>
             Switch to Creator
           </button>
@@ -294,7 +294,7 @@ export default function NewReview({
       <div className="review-footer">
         <p>Draft auto-saved locally. Final publication always requires Manager &amp; Reviewer approval.</p>
         <div>
-          <button type="button" className="primary-button" onClick={submitForReview} disabled={busy || user.role !== 'creator'}>
+          <button type="button" className="primary-button" onClick={submitForReview} disabled={busy || (user.role !== 'creator' && user.role !== 'manager')}>
             {busy ? statusMessage : 'Submit for review'} <span aria-hidden="true">→</span>
           </button>
         </div>

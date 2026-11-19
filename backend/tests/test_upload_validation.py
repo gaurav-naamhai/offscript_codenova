@@ -23,7 +23,7 @@ def test_valid_text_submission(client):
 
 
 def test_non_creator_role_rejected(client):
-    for role in ["manager", "authorised_reviewer", "admin", "viewer"]:
+    for role in ["authorised_reviewer", "admin", "viewer"]:
         response = client.post(
             "/submissions",
             data={
@@ -36,6 +36,17 @@ def test_non_creator_role_rejected(client):
         data = response.json()
         assert data["error"]["code"] == "forbidden"
         assert "Only creators" in data["error"]["message"]
+
+    # Manager has full access to create submissions
+    mgr_res = client.post(
+        "/submissions",
+        data={
+            "content_type": "text",
+            "role": "manager",
+            "text": "Manager created submission.",
+        },
+    )
+    assert mgr_res.status_code == 201
 
 
 def test_invalid_content_type(client):

@@ -66,9 +66,15 @@ def test_revise_submission_permissions_and_state(client):
 
     res_403 = client.post(
         f"/submissions/{sub_id}/revise",
-        data={"content_type": "text", "role": "manager", "text": "Illegal edit"},
+        data={"content_type": "text", "role": "authorised_reviewer", "text": "Illegal edit"},
     )
     assert res_403.status_code == 403
+
+    mgr_revise = client.post(
+        f"/submissions/{sub_id}/revise",
+        data={"content_type": "text", "role": "manager", "text": "Manager edit"},
+    )
+    assert mgr_revise.status_code == 200
 
     client.post(f"/submissions/{sub_id}/check", json={"role": "creator"})
     res_409 = client.post(
@@ -193,9 +199,15 @@ def test_flag_resolution_dismiss_and_permissions(client):
 
     non_creator = client.post(
         f"/submissions/{sub_id}/flags/{target_id}/resolution",
-        json={"action": "dismiss", "role": "manager"},
+        json={"action": "dismiss", "role": "authorised_reviewer"},
     )
     assert non_creator.status_code == 403
+
+    mgr_dismiss = client.post(
+        f"/submissions/{sub_id}/flags/{target_id}/resolution",
+        json={"action": "dismiss", "role": "manager", "comment": "Dismissed by manager"},
+    )
+    assert mgr_dismiss.status_code == 200
 
     dismiss_res = client.post(
         f"/submissions/{sub_id}/flags/{target_id}/resolution",

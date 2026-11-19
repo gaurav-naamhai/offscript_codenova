@@ -220,6 +220,8 @@ async def record_audit(
 
 
 def require_role(role: str, allowed: Set[str], context: str = "") -> None:
+    if role == "manager":
+        return
     if role not in allowed:
         msg = (
             f"Only creators can {context}"
@@ -1091,7 +1093,7 @@ def create_app(
             id,
             effective_role,
             "check_retried",
-            "Compliance check retried by creator",
+            f"Compliance check retried by {effective_role}",
             x_actor=actor_label,
             timestamp=now_iso,
         )

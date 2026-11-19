@@ -41,7 +41,7 @@ def test_error_envelope_404(client):
 def test_error_envelope_403(client):
     response = client.post(
         "/submissions",
-        data={"content_type": "text", "role": "manager", "text": "Hello"},
+        data={"content_type": "text", "role": "authorised_reviewer", "text": "Hello"},
     )
     assert response.status_code == 403
     data = response.json()

@@ -135,10 +135,16 @@ def test_recheck_flag_wrong_role_returns_403(client):
 
     recheck_res = client.post(
         f"/submissions/{sub_id}/flags/{flag_id}/recheck",
-        json={"role": "manager"},
+        json={"role": "authorised_reviewer"},
     )
     assert recheck_res.status_code == 403
     assert recheck_res.json()["error"]["code"] == "forbidden"
+
+    mgr_recheck = client.post(
+        f"/submissions/{sub_id}/flags/{flag_id}/recheck",
+        json={"role": "manager"},
+    )
+    assert mgr_recheck.status_code == 200
 
 
 def test_accept_resolution_safety_passage_not_found_returns_409(client):

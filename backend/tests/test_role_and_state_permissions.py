@@ -8,13 +8,19 @@ def test_check_wrong_role_returns_403(client):
     )
     sub_id = res.json()["id"]
 
-    for invalid_role in ["manager", "authorised_reviewer", "admin"]:
+    for invalid_role in ["authorised_reviewer", "admin"]:
         check_res = client.post(
             f"/submissions/{sub_id}/check",
             json={"role": invalid_role},
         )
         assert check_res.status_code == 403
         assert check_res.json()["error"]["code"] == "forbidden"
+
+    mgr_check = client.post(
+        f"/submissions/{sub_id}/check",
+        json={"role": "manager"},
+    )
+    assert mgr_check.status_code == 200
 
 
 def test_check_wrong_state_returns_409(client):
@@ -108,14 +114,21 @@ def test_decision_in_final_approval_wrong_role_returns_403(client):
         json={"role": "manager", "decision": "approve"},
     )
 
-    # In final_approval, role must be authorised_reviewer. Others -> 403
-    for invalid_role in ["creator", "manager", "admin"]:
+    # In final_approval, creator and admin cannot decide -> 403
+    for invalid_role in ["creator", "admin"]:
         dec_res = client.post(
             f"/submissions/{sub_id}/decision",
             json={"role": invalid_role, "decision": "approve"},
         )
         assert dec_res.status_code == 403
         assert dec_res.json()["error"]["code"] == "forbidden"
+
+    # Manager has full access to decide in final_approval
+    mgr_dec = client.post(
+        f"/submissions/{sub_id}/decision",
+        json={"role": "manager", "decision": "approve"},
+    )
+    assert mgr_dec.status_code == 200
 
 
 def test_invalid_decision_action_returns_422(client):

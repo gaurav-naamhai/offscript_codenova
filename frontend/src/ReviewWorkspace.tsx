@@ -620,7 +620,7 @@ export default function ReviewWorkspace({
             </p>
           )}
 
-          {!isHistoricalView && user.role === 'creator' && (
+          {!isHistoricalView && (user.role === 'creator' || user.role === 'manager') && (
             <div className="action-buttons-row">
               {f.status === 'open' && f.suggested_correction && sub.content_type === 'text' && (
                 <button type="button" className="btn-accept" onClick={() => handleResolve(f, 'accept')} disabled={!!busy}>
@@ -763,7 +763,7 @@ export default function ReviewWorkspace({
       {sub.processing_stage === 'failed' && (
         <div className="workspace-notice" role="alert" style={{ background: '#45181b', color: '#ffc5c8', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
           <span>Processing failed safely: {sub.processing_error || 'Provider timeout or error.'}</span>
-          {user.role === 'creator' && (
+          {(user.role === 'creator' || user.role === 'manager') && (
             <button type="button" className="btn-accept" onClick={() => void handleCheck(true)}>
               Retry check
             </button>
@@ -873,8 +873,8 @@ export default function ReviewWorkspace({
             )}
           </div>
 
-          {/* Creator Revision / Replacement Controls */}
-          {!isHistoricalView && user.role === 'creator' && !editing && sub.status !== 'ai_review' && (
+          {/* Creator & Manager Revision / Replacement Controls */}
+          {!isHistoricalView && (user.role === 'creator' || user.role === 'manager') && !editing && sub.status !== 'ai_review' && (
             <div className="workspace-actions" style={{ marginTop: '12px' }}>
               {sub.content_type === 'text' ? (
                 <button
@@ -993,7 +993,7 @@ export default function ReviewWorkspace({
           {flags.some(f => f.origin === 'error') && (
             <div className="stale-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
               <span>One or more automated checks encountered an error.</span>
-              {user.role === 'creator' && (
+              {(user.role === 'creator' || user.role === 'manager') && (
                 <button type="button" className="btn-recheck" onClick={() => void handleCheck(true)}>
                   Retry check
                 </button>
@@ -1058,19 +1058,20 @@ export default function ReviewWorkspace({
 
         <div className="workspace-actions">
           {sub.status === 'draft' &&
-            (user.role === 'creator' ? (
+            (user.role === 'creator' || user.role === 'manager' ? (
               <button type="button" onClick={() => void handleCheck(false)} disabled={!!busy} style={{ background: '#dec9f2', fontWeight: 700 }}>
                 Run Compliance Check →
               </button>
             ) : (
               <button type="button" onClick={onSwitchAccount}>
-                Switch to Creator to run check
+                Switch to Creator or Manager to run check
               </button>
             ))}
 
           {(sub.status === 'manager_review' || sub.status === 'final_approval') && (() => {
             const requiredRole = sub.status === 'manager_review' ? 'manager' : 'authorised_reviewer'
-            if (user.role !== requiredRole) {
+            const canReview = user.role === requiredRole || user.role === 'manager'
+            if (!canReview) {
               return (
                 <button type="button" onClick={onSwitchAccount} style={{ background: '#dec9f2' }}>
                   Switch to {requiredRole.replace('_', ' ')} to review
