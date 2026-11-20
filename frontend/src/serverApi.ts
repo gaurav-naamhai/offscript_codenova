@@ -330,6 +330,8 @@ export type ComplianceCertificate = {
 
 const TOKEN_KEY = 'inkloom_auth_token'
 const USER_KEY = 'inkloom_auth_user'
+export const AUTH_SESSION_EVENT = 'inkloom-auth-session-changed'
+export const isAuthStorageKey = (key: string | null) => key === null || key === TOKEN_KEY || key === USER_KEY
 
 export function getStoredToken(): string {
   try {
@@ -352,6 +354,7 @@ export function setAuthSession(token: string, user: AuthUser): void {
   try {
     window.localStorage.setItem(TOKEN_KEY, token)
     window.localStorage.setItem(USER_KEY, JSON.stringify(user))
+    window.dispatchEvent(new Event(AUTH_SESSION_EVENT))
   } catch {
     // ignore storage quota failures
   }
@@ -361,6 +364,7 @@ export function clearAuthSession(): void {
   try {
     window.localStorage.removeItem(TOKEN_KEY)
     window.localStorage.removeItem(USER_KEY)
+    window.dispatchEvent(new Event(AUTH_SESSION_EVENT))
   } catch {
     // ignore
   }

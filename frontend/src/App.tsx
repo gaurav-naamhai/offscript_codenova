@@ -9,6 +9,8 @@ import GlobalSearch from './GlobalSearch'
 import ReviewWorkflow from './ReviewWorkflow'
 import AuthModal from './AuthModal'
 import {
+  AUTH_SESSION_EVENT,
+  isAuthStorageKey,
   clearAuthSession,
   DEFAULT_DEMO_ACCOUNT,
   getStoredToken,
@@ -307,11 +309,14 @@ function Hero({ onStart, onLibrary, brandName }: { onStart: () => void; onLibrar
         </div>
         <div className="eyebrow formats">Text · Images · PDF</div>
       </div>
-      <img
-        className="hero-art"
-        src={`${import.meta.env.BASE_URL}assets/hero-ribbon-document-wide.png`}
-        alt="Silver ribbon surrounding a document with a highlighted passage"
-      />
+      <span className="hero-art">
+        <img
+          className="hero-art-image"
+          src={`${import.meta.env.BASE_URL}assets/hero-ribbon-document-wide.png`}
+          alt="Silver ribbon surrounding a document with a highlighted passage"
+        />
+        <span className="hero-ribbon-glint" aria-hidden="true" />
+      </span>
     </section>
   )
 }
@@ -450,6 +455,50 @@ function App() {
       if (retryTimer !== null) window.clearTimeout(retryTimer)
     }
   }, [])
+
+  // Auth changes in another tab invalidate its old role, organisation, and open record here.
+  useEffect(() => {
+    let timer: number | undefined
+    const reconcile = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const token = getStoredToken()
+        const next = token ? getStoredUser() : null
+        if (!next) {
+          setUser(null)
+          setSubmissions([])
+          setActiveId(null)
+          setSearchOpen(false)
+          setAuthModalOpen(false)
+          setError(null)
+          return
+        }
+        if (next.user_id !== user?.user_id || next.org_id !== user?.org_id || next.role !== user?.role) {
+          setSubmissions([])
+          setActiveId(null)
+          setSelectedDocument(null)
+          setSearchOpen(false)
+          setError(null)
+          setPage('dashboard')
+          writeHashRoute('dashboard', null)
+        }
+        setUser(next)
+        void serverApi.me().then(verified => {
+          if (getStoredToken() === token) setUser(verified)
+        }).catch(() => {
+          if (getStoredToken() === token) clearAuthSession()
+        })
+      }, 0)
+    }
+    const onStorage = (event: StorageEvent) => { if (isAuthStorageKey(event.key)) reconcile() }
+    window.addEventListener('storage', onStorage)
+    window.addEventListener(AUTH_SESSION_EVENT, reconcile)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener(AUTH_SESSION_EVENT, reconcile)
+    }
+  }, [user?.user_id, user?.org_id, user?.role])
 
   // Sync URL hash changes (supports browser back/forward & page refresh on saved reviews)
   useEffect(() => {
