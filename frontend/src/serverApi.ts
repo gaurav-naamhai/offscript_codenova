@@ -744,4 +744,40 @@ export const serverApi = {
   async seed(): Promise<void> {
     await request('/demo/seed', { method: 'POST' })
   },
+
+  async pingHealth(timeoutMs = 5000): Promise<{ ok: boolean; latencyMs: number }> {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+    const started = performance.now()
+    try {
+      const response = await fetch(`${apiBase}/health`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      })
+      return { ok: response.ok, latencyMs: Math.round(performance.now() - started) }
+    } catch {
+      return { ok: false, latencyMs: Math.round(performance.now() - started) }
+    } finally {
+      window.clearTimeout(timer)
+    }
+  },
+}
+
+export const DEFAULT_DEMO_ACCOUNT: {
+  email: string
+  password: string
+  user: AuthUser
+} = {
+  email: 'creator@brightleaf.co',
+  password: 'brightleaf123',
+  user: {
+    user_id: 'u-bl-creator',
+    email: 'creator@brightleaf.co',
+    name: 'Maya Chen',
+    role: 'creator',
+    org_id: 'brightleaf',
+    org_name: 'BrightLeaf Organics',
+    brand_name: 'BrightLeaf',
+  },
 }

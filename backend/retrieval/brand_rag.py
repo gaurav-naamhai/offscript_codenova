@@ -588,9 +588,6 @@ def create_rectified_brand_doc_version(
     if not replaced:
         raise ValueError(f"Target guideline chunk '{target_chunk_id}' was not found in document '{source_doc_id}'.")
 
-    # Deactivate old version while keeping all its rows & chunks intact for history!
-    deactivate_brand_doc(document_id=source_doc_id, org_id=org_id)
-
     title = source_doc["title"]
     category = source_doc.get("category") or "guideline"
     brand_name = source_doc.get("brand_name") or org_id
@@ -605,6 +602,8 @@ def create_rectified_brand_doc_version(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     if not _supabase_configured():
+        # Deactivate old version in local store while keeping all its rows & chunks intact for history
+        deactivate_brand_doc(document_id=source_doc_id, org_id=org_id)
         new_doc_id = str(uuid.uuid4())
         new_doc_row = {
             "id": new_doc_id,
@@ -654,23 +653,27 @@ def create_rectified_brand_doc_version(
         )
 
     sb = get_supabase_client()
-    doc_insert = (
-        sb.table("brand_documents")
-        .insert(
-            {
-                "title": title,
-                "category": category,
-                "version": new_version,
-                "is_active": True,
-                "source_filename": filename,
-                "storage_path": encoded_path,
-            }
-        )
-        .execute()
-    )
-    if not doc_insert.data:
-        raise RuntimeError("Failed to insert rectified brand document version.")
-    new_doc_id = doc_insert.data[0]["id"]
+    expected_revision = source_doc.get("revision_number")
+    rpc_res = sb.rpc(
+        "publish_brand_document_version",
+        {
+            "p_source_doc_id": source_doc_id,
+            "p_expected_revision": int(expected_revision) if expected_revision is not None else None,
+            "p_title": title,
+            "p_category": category,
+            "p_new_version": new_version,
+            "p_source_filename": filename,
+            "p_storage_path": encoded_path,
+            "p_org_id": org_id,
+            "p_approved_by": approved_by,
+            "p_reason": f"Rectified chunk {target_chunk_id}",
+        },
+    ).execute()
+    if not rpc_res.data:
+        raise RuntimeError("publish_brand_document_version returned no data.")
+    row0 = rpc_res.data[0]
+    new_doc_id = row0["new_document_id"]
+    published_at = row0.get("created_at") or now_iso
 
     vectors = embed_texts([c.content for c in updated_chunks])
     chunk_rows = [
@@ -699,7 +702,7 @@ def create_rectified_brand_doc_version(
         brand_name=brand_name,
         previous_version_id=source_doc_id,
         constitution=constitution,
-        created_at=doc_insert.data[0].get("created_at") or now_iso,
+        created_at=published_at,
     )
 
 

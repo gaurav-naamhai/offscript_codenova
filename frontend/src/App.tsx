@@ -8,7 +8,13 @@ import ReviewWorkspace from './ReviewWorkspace'
 import GlobalSearch from './GlobalSearch'
 import ReviewWorkflow from './ReviewWorkflow'
 import AuthModal from './AuthModal'
-import { clearAuthSession, getStoredToken, getStoredUser, serverApi } from './serverApi'
+import {
+  clearAuthSession,
+  DEFAULT_DEMO_ACCOUNT,
+  getStoredToken,
+  getStoredUser,
+  serverApi,
+} from './serverApi'
 import type { AuthUser, DemoRole, SubmissionSummary } from './serverApi'
 import './App.css'
 import './ReviewLibrary.css'
@@ -337,8 +343,13 @@ function StatusSummary({ submissions }: { submissions: SubmissionSummary[] }) {
 
 function App() {
   const initial = parseHashRoute()
-  const [user, setUser] = useState<AuthUser | null>(() => getStoredUser())
+  const [user, setUser] = useState<AuthUser | null>(() => getStoredUser() || DEFAULT_DEMO_ACCOUNT.user)
   const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [backendPhase, setBackendPhase] = useState<'waking' | 'authenticating' | 'ready'>('waking')
+  const [showWakeBanner, setShowWakeBanner] = useState(true)
+  const [wakeElapsedSec, setWakeElapsedSec] = useState(0)
+  const [wakePingCount, setWakePingCount] = useState(0)
+  const [wakeLatencyMs, setWakeLatencyMs] = useState<number | null>(null)
   const [submissions, setSubmissions] = useState<SubmissionSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<Page>(initial.page)
@@ -348,22 +359,95 @@ function App() {
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
   const [focusKnowledgeUpload, setFocusKnowledgeUpload] = useState(false)
 
-  // Verify stored token on startup
+  const fetchSubmissions = useCallback(async () => {
+    if (!getStoredToken()) {
+      setSubmissions([])
+      return
+    }
+    try {
+      const list = await serverApi.list()
+      setSubmissions(list)
+      setError(null)
+    } catch (err) {
+      if (backendPhase === 'ready') {
+        setError(err instanceof Error ? err.message : 'Failed to connect to backend server')
+      }
+    }
+  }, [backendPhase])
+
+  // Dynamic Render backend wake-up monitor + automatic demo login
   useEffect(() => {
-    const tok = getStoredToken()
-    if (!tok) return
-    let mounted = true
-    void serverApi
-      .me()
-      .then(verified => {
-        if (mounted) setUser(verified)
-      })
-      .catch(() => {
-        clearAuthSession()
-        if (mounted) setUser(null)
-      })
+    let active = true
+    const startedAt = Date.now()
+    const tickTimer = window.setInterval(() => {
+      if (active) {
+        setWakeElapsedSec(Math.floor((Date.now() - startedAt) / 1000))
+      }
+    }, 1000)
+
+    let retryTimer: number | null = null
+
+    async function probeAndConnect() {
+      if (!active) return
+      setWakePingCount(c => c + 1)
+      const res = await serverApi.pingHealth(5000)
+      if (!active) return
+
+      if (!res.ok) {
+        retryTimer = window.setTimeout(() => void probeAndConnect(), 2500)
+        return
+      }
+
+      setWakeLatencyMs(res.latencyMs)
+      setBackendPhase('authenticating')
+
+      const tok = getStoredToken()
+      try {
+        if (tok) {
+          const verified = await serverApi.me()
+          if (active) setUser(verified)
+        } else {
+          const loginRes = await serverApi.login(
+            DEFAULT_DEMO_ACCOUNT.email,
+            DEFAULT_DEMO_ACCOUNT.password
+          )
+          if (active) setUser(loginRes.user)
+        }
+      } catch {
+        try {
+          const fallback = await serverApi.login(
+            DEFAULT_DEMO_ACCOUNT.email,
+            DEFAULT_DEMO_ACCOUNT.password
+          )
+          if (active) setUser(fallback.user)
+        } catch {
+          // keep demo preview user if login fails
+        }
+      }
+
+      if (!active) return
+      setBackendPhase('ready')
+      window.clearInterval(tickTimer)
+      try {
+        const list = await serverApi.list()
+        if (active) {
+          setSubmissions(list)
+          setError(null)
+        }
+      } catch {
+        // handled by fetchSubmissions
+      }
+      window.setTimeout(() => {
+        if (active) setShowWakeBanner(false)
+      }, 3000)
+    }
+
+    void probeAndConnect()
+
     return () => {
-      mounted = false
+      active = false
+      window.clearInterval(tickTimer)
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
     }
   }, [])
 
@@ -388,20 +472,6 @@ function App() {
     }
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
-  }, [])
-
-  const fetchSubmissions = useCallback(async () => {
-    if (!getStoredToken()) {
-      setSubmissions([])
-      return
-    }
-    try {
-      const list = await serverApi.list()
-      setSubmissions(list)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to connect to backend server')
-    }
   }, [])
 
   useEffect(() => {
@@ -480,6 +550,60 @@ function App() {
           onSearch={() => setSearchOpen(true)}
           onOpenAuth={() => setAuthModalOpen(true)}
         />
+        {showWakeBanner && (
+          <div
+            className={`backend-wakeup-banner ${backendPhase === 'ready' ? 'ready' : ''}`}
+            role="status"
+            aria-live="polite"
+          >
+            <div className="backend-wakeup-top">
+              <strong>
+                {backendPhase === 'ready'
+                  ? `Backend connected (${wakeLatencyMs != null ? `${(wakeLatencyMs / 1000).toFixed(1)}s` : 'ready'}) — live demo session synced`
+                  : backendPhase === 'authenticating'
+                    ? 'Backend awake — signing into BrightLeaf demo workspace…'
+                    : 'Waking up Render backend (free-tier cold start)…'}
+              </strong>
+              <div className="backend-wakeup-meta">
+                {backendPhase === 'waking' && (
+                  <>
+                    <span>
+                      {wakeElapsedSec < 55
+                        ? `~${55 - wakeElapsedSec}s est. remaining`
+                        : 'Finalizing startup…'}
+                    </span>
+                    <span>•</span>
+                    <span>{wakeElapsedSec}s elapsed</span>
+                    <span>•</span>
+                    <span>Live /health ping #{wakePingCount}</span>
+                  </>
+                )}
+                {backendPhase === 'ready' && (
+                  <button
+                    type="button"
+                    className="sidebar-mini-btn ghost"
+                    onClick={() => setShowWakeBanner(false)}
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            </div>
+            {backendPhase !== 'ready' && (
+              <div className="backend-wakeup-track" aria-hidden="true">
+                <div
+                  className="backend-wakeup-fill"
+                  style={{
+                    width:
+                      backendPhase === 'authenticating'
+                        ? '96%'
+                        : `${Math.min(92, Math.max(6, Math.round((wakeElapsedSec / 55) * 92)))}%`,
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
         {error && (
           <div className="storage-error" role="alert" style={{ margin: '16px 25px 0' }}>
             {error}
