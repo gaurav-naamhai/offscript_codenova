@@ -491,24 +491,59 @@ def ingest_brand_doc(
 
     # Live Supabase persistence
     sb = get_supabase_client()
-    doc_insert = (
+    document_family = f"{title.strip().lower()}::{(category or 'guideline').strip().lower()}"
+    existing_family_rows = (
         sb.table("brand_documents")
-        .insert(
-            {
-                "title": title,
-                "category": category,
-                "version": version,
-                "is_active": True,
-                "source_filename": filename,
-                "storage_path": encoded_path,
-            }
-        )
+        .select("id,revision_number,is_active")
+        .eq("org_id", clean_org)
+        .eq("document_family", document_family)
+        .order("revision_number", desc=True)
         .execute()
+        .data
+        or []
     )
-    if not doc_insert.data:
-        raise RuntimeError("Failed to insert row into brand_documents.")
-    doc_row = doc_insert.data[0]
-    doc_id = doc_row["id"]
+    active_existing = next((r for r in existing_family_rows if r.get("is_active")), None)
+
+    if active_existing:
+        rpc_res = sb.rpc(
+            "publish_brand_document_version",
+            {
+                "p_source_doc_id": active_existing["id"],
+                "p_expected_revision": active_existing.get("revision_number"),
+                "p_title": title,
+                "p_category": category,
+                "p_new_version": version,
+                "p_source_filename": filename,
+                "p_storage_path": encoded_path,
+                "p_org_id": clean_org,
+                "p_approved_by": "upload",
+                "p_reason": "Uploaded new guideline version",
+            },
+        ).execute()
+        if not rpc_res.data:
+            raise RuntimeError("publish_brand_document_version returned no data during upload.")
+        doc_row = rpc_res.data[0]
+        doc_id = doc_row["new_document_id"]
+    else:
+        max_rev = max((int(r.get("revision_number") or 0) for r in existing_family_rows), default=0)
+        insert_payload = {
+            "title": title,
+            "category": category,
+            "version": version,
+            "is_active": True,
+            "source_filename": filename,
+            "storage_path": encoded_path,
+            "org_id": clean_org,
+            "document_family": document_family,
+            "revision_number": max_rev + 1,
+        }
+        if previous_version_id:
+            insert_payload["previous_version_id"] = previous_version_id
+        doc_insert = sb.table("brand_documents").insert(insert_payload).execute()
+        if not doc_insert.data:
+            raise RuntimeError("Failed to insert row into brand_documents.")
+        doc_row = doc_insert.data[0]
+        doc_id = doc_row["id"]
 
     vectors = embed_texts([c.content for c in chunks])
     chunk_rows = [
