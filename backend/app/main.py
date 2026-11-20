@@ -74,8 +74,13 @@ from app.models import (
 )
 from app.pipeline import run_pipeline
 from app.repository import SubmissionRepository, get_repository
+from app.review_state import current_review_state
 
 logger = logging.getLogger("inkloom_app")
+
+
+class StaleCheckResult(RuntimeError):
+    """A newer submission version or review job replaced this check."""
 
 ALLOWED_IMAGE_PREFIXES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
 MAX_TEXT_LENGTH = 50000
@@ -181,6 +186,7 @@ async def get_sub_or_404(
     sub_id: str,
     user: Optional[UserAccount] = None,
 ) -> Submission:
+    await repo.expire_stale_checks(420)
     sub = await repo.get_submission(sub_id)
     if not sub:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -193,7 +199,9 @@ async def _find_flag(repo: SubmissionRepository, sub_id: str, flag_id: str, vers
     flags = await repo.get_flags(sub_id, version=version)
     target = next((f for f in flags if f.id == flag_id), None)
     if not target:
-        target = next((f for f in await repo.get_all_flags(sub_id) if f.id == flag_id), None)
+        older = next((f for f in await repo.get_all_flags(sub_id) if f.id == flag_id), None)
+        if older:
+            raise HTTPException(status_code=409, detail="This finding belongs to an older version. Refresh the review before acting.")
     if not target:
         raise HTTPException(status_code=404, detail="Flag not found")
     return target
@@ -266,6 +274,14 @@ def _blocking_flags(flags: List[Flag]) -> List[Flag]:
     ]
 
 
+def _review_summary(sub: Submission, flags: List[Flag], decisions: List[Decision] = ()) -> tuple[Optional[int], Optional[int], str]:
+    state = current_review_state(sub, flags, decisions)
+    if state in {"not_checked", "review_in_progress", "review_incomplete"}:
+        return None, None, state
+    brand_score, fact_score, _ = compute_fidelity_scores(flags)
+    return brand_score, fact_score, state
+
+
 def create_app(
     repo: Optional[SubmissionRepository] = None,
     settings: Optional[Settings] = None,
@@ -274,6 +290,7 @@ def create_app(
     app_settings = settings or Settings()
     app_repo = repo or get_repository(app_settings.repo_backend)
     background_tasks: Set[asyncio.Task] = set()
+    rectification_approval_lock = asyncio.Lock()
 
     def _resolve_context(
         authorization: Optional[str],
@@ -380,9 +397,14 @@ def create_app(
         actor_role: str,
         x_actor: Optional[str],
     ) -> Tuple[List[Flag], list]:
+        expected_version = sub.version
+        job_id = sub.processing_job_id
+        if not job_id:
+            raise StaleCheckResult("Review job no longer current")
+
         def _progress_update(stage: str) -> None:
             sub.processing_stage = stage
-            sub.updated_at = datetime.now(timezone.utc).isoformat()
+            app_repo.update_check_stage_if_current(sub.id, expected_version, job_id, stage)
 
         content = ContentPayload(
             content_type=sub.content_type,
@@ -392,6 +414,7 @@ def create_app(
             file_bytes=sub.file_bytes,
             org_id=sub.org_id,
             brand_name=sub.brand_name,
+            mock_mode=app_settings.mock_ai,
         )
         flags, degraded_modules = await run_in_threadpool(
             run_pipeline,
@@ -416,14 +439,18 @@ def create_app(
                 x_actor=x_actor,
             )
 
-        await app_repo.set_flags(sub.id, flags, version=sub.version)
         completed_iso = datetime.now(timezone.utc).isoformat()
-        sub.status = "manager_review"
-        sub.processing_stage = "completed"
+        completed = sub.model_copy(update={
+            "status": "manager_review", "processing_stage": "incomplete" if degraded_modules else "completed",
+            "processing_error": None, "processing_job_id": None, "updated_at": completed_iso,
+        })
+        if not await app_repo.complete_check(completed, expected_version, job_id, flags, _snapshot_from_submission(completed)):
+            raise StaleCheckResult("Review results belong to an older job or version")
+        sub.status = completed.status
+        sub.processing_stage = completed.processing_stage
         sub.processing_error = None
+        sub.processing_job_id = None
         sub.updated_at = completed_iso
-        await app_repo.update_submission(sub)
-        await app_repo.save_version_snapshot(sub.id, _snapshot_from_submission(sub))
 
         await record_audit(
             app_repo,
@@ -440,23 +467,15 @@ def create_app(
         sub = await app_repo.get_submission(sub_id)
         if not sub:
             return
+        sub = sub.model_copy(deep=True)
         try:
             await _execute_check_for_submission(sub, actor_role, x_actor)
+        except StaleCheckResult:
+            await record_audit(app_repo, sub_id, actor_role, "stale_check_discarded", f"Discarded results for v{sub.version} from an older job", x_actor=x_actor)
         except Exception as exc:
             logger.error("Async compliance check failed for %s: %s", sub_id, exc, exc_info=True)
-            sub.status = "draft"
-            sub.processing_stage = "failed"
-            sub.processing_error = str(exc)
-            sub.updated_at = datetime.now(timezone.utc).isoformat()
-            await app_repo.update_submission(sub)
-            await record_audit(
-                app_repo,
-                sub.id,
-                actor_role,
-                "check_failed",
-                f"Compliance check failed safely: {exc}",
-                x_actor=x_actor,
-            )
+            if await app_repo.fail_check(sub.id, sub.version, sub.processing_job_id or "", str(exc)):
+                await record_audit(app_repo, sub.id, actor_role, "check_failed", f"Compliance check failed safely: {exc}", x_actor=x_actor)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -530,7 +549,7 @@ def create_app(
     @app.post("/auth/login")
     async def auth_login(payload: LoginRequest):
         """Authenticate with email and password and receive a signed Bearer token."""
-        user = authenticate_user(payload.email, payload.password)
+        user = await run_in_threadpool(authenticate_user, payload.email, payload.password)
         if not user:
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         token = create_access_token(user, app_settings.auth_secret)
@@ -539,7 +558,7 @@ def create_app(
     @app.post("/auth/register", status_code=status.HTTP_201_CREATED)
     async def auth_register(payload: RegisterRequest):
         """Create a new organisation/role account and return a signed Bearer token."""
-        user = register_user(
+        user = await run_in_threadpool(register_user,
             email=payload.email,
             password=payload.password,
             name=payload.name,
@@ -583,6 +602,7 @@ def create_app(
     ):
         """List submissions scoped strictly to the authenticated organisation."""
         user, _, org_id, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
+        await app_repo.expire_stale_checks(420)
         submissions = await app_repo.list_submissions(
             status=status,
             org_id=org_id if user else None,
@@ -590,6 +610,7 @@ def create_app(
         results = []
         for sub in submissions:
             flags = await app_repo.get_flags(sub.id, version=sub.version)
+            decisions = await app_repo.get_decisions(sub.id)
             results.append(
                 SubmissionListItem(
                     id=sub.id,
@@ -607,6 +628,7 @@ def create_app(
                     created_at=sub.created_at,
                     flag_count=len(flags),
                     needs_human_count=sum(1 for f in flags if f.needs_human),
+                    readiness_status=current_review_state(sub, flags, decisions),
                 )
             )
         return results
@@ -714,6 +736,9 @@ def create_app(
             sub.version += 1
             sub.status = "draft"
             sub.manager_approved_by = None
+            sub.processing_stage = None
+            sub.processing_error = None
+            sub.processing_job_id = None
             await record_audit(
                 app_repo,
                 id,
@@ -741,6 +766,7 @@ def create_app(
         sub.extracted_text = None
         sub.processing_stage = None
         sub.processing_error = None
+        sub.processing_job_id = None
         sub.updated_at = now_iso
 
         await app_repo.update_submission(sub)
@@ -820,15 +846,16 @@ def create_app(
                         detail=f"Flag passage '{target_flag.passage}' was not found in the current text",
                     )
                 if target_flag.suggested_correction:
-                    if sub.status in {"final_approval", "approved"} or (
-                        app_settings.enforce_approval_gates and sub.status == "manager_review"
-                    ):
+                    if sub.status != "draft":
                         await app_repo.save_version_snapshot(id, _snapshot_from_submission(sub))
                         old_status = sub.status
                         old_version = sub.version
                         sub.version += 1
                         sub.status = "draft"
                         sub.manager_approved_by = None
+                        sub.processing_stage = None
+                        sub.processing_error = None
+                        sub.processing_job_id = None
                         await record_audit(
                             app_repo,
                             id,
@@ -841,6 +868,9 @@ def create_app(
                     sub.text = current_text.replace(
                         target_flag.passage, target_flag.suggested_correction, 1
                     )
+                    sub.processing_stage = None
+                    sub.processing_error = None
+                    sub.processing_job_id = None
                     sub.updated_at = now_iso
                     await app_repo.update_submission(sub)
                     await app_repo.save_version_snapshot(id, _snapshot_from_submission(sub))
@@ -975,8 +1005,8 @@ def create_app(
         user, _, _, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
         sub = await get_sub_or_404(app_repo, id, user=user)
         flags = await app_repo.get_flags(id, version=sub.version)
-        stage = sub.processing_stage or ("completed" if sub.status != "ai_review" else "extracting")
-        pct = STAGE_PROGRESS_PCT.get(stage, 100 if sub.status != "ai_review" else 35)
+        stage = sub.processing_stage or ("extracting" if sub.status == "ai_review" else None)
+        pct = STAGE_PROGRESS_PCT.get(stage, 100 if stage == "incomplete" else 0)
         return SubmissionStatusResponse(
             id=sub.id,
             status=sub.status,
@@ -986,6 +1016,7 @@ def create_app(
             progress_pct=pct,
             flag_count=len(flags),
             updated_at=sub.updated_at,
+            readiness_status=current_review_state(sub, flags),
         )
 
     @app.post("/submissions/{id}/check", response_model=CheckResponse)
@@ -1008,11 +1039,15 @@ def create_app(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         actor_label = user.name if user else x_actor
+        sub = sub.model_copy(deep=True)
+        expected_version, expected_status = sub.version, sub.status
         sub.status = "ai_review"
         sub.processing_stage = "extracting"
         sub.processing_error = None
+        sub.processing_job_id = str(uuid.uuid4())
         sub.updated_at = now_iso
-        await app_repo.update_submission(sub)
+        if not await app_repo.begin_check(sub, expected_version, expected_status):
+            raise HTTPException(409, "A newer version or another check is already in progress. Refresh this submission.")
         await record_audit(
             app_repo,
             id,
@@ -1033,18 +1068,16 @@ def create_app(
 
         try:
             flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
+        except StaleCheckResult:
+            raise HTTPException(409, "This check finished for an older job or version; its results were discarded. Refresh the submission.")
         except Exception as exc:
-            sub.status = "draft"
-            sub.processing_stage = "failed"
-            sub.processing_error = str(exc)
-            sub.updated_at = datetime.now(timezone.utc).isoformat()
-            await app_repo.update_submission(sub)
+            await app_repo.fail_check(sub.id, sub.version, sub.processing_job_id or "", str(exc))
             raise
 
         hist_flags = await app_repo.get_all_flags(org_id=sub.org_id if user else None)
         prior_flags = [hf for hf in hist_flags if hf.submission_id != sub.id]
         hints = compute_recurring_hints(flags, prior_flags, submission_text=sub.text or sub.extracted_text)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        b_score, f_score, readiness = _review_summary(sub, flags)
         return CheckResponse(
             submission=sub,
             flags=flags,
@@ -1075,7 +1108,9 @@ def create_app(
 
         existing_flags = await app_repo.get_flags(id, version=sub.version)
         has_error_flags = any(f.origin == "error" for f in existing_flags)
-        if sub.status not in {"draft", "ai_review"} and not (sub.status == "manager_review" and has_error_flags):
+        if sub.status == "ai_review":
+            raise HTTPException(409, "A check is already in progress. Wait for it to finish before retrying.")
+        if sub.status != "draft" and not (sub.status == "manager_review" and (has_error_flags or sub.processing_stage == "incomplete")):
             raise HTTPException(
                 status_code=409,
                 detail=f"Retry is only allowed on draft, failed, or degraded checks (current state: '{sub.status}').",
@@ -1083,11 +1118,15 @@ def create_app(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         actor_label = user.name if user else x_actor
+        sub = sub.model_copy(deep=True)
+        expected_version, expected_status = sub.version, sub.status
         sub.status = "ai_review"
         sub.processing_stage = "extracting"
         sub.processing_error = None
+        sub.processing_job_id = str(uuid.uuid4())
         sub.updated_at = now_iso
-        await app_repo.update_submission(sub)
+        if not await app_repo.begin_check(sub, expected_version, expected_status):
+            raise HTTPException(409, "A newer version or another check is already in progress. Refresh this submission.")
         await record_audit(
             app_repo,
             id,
@@ -1106,8 +1145,14 @@ def create_app(
             t.start()
             return CheckResponse(submission=sub, flags=[], degraded_modules=[])
 
-        flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        try:
+            flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
+        except StaleCheckResult:
+            raise HTTPException(409, "This check finished for an older job or version; its results were discarded. Refresh the submission.")
+        except Exception as exc:
+            await app_repo.fail_check(sub.id, sub.version, sub.processing_job_id or "", str(exc))
+            raise
+        b_score, f_score, readiness = _review_summary(sub, flags)
         return CheckResponse(
             submission=sub,
             flags=flags,
@@ -1141,7 +1186,15 @@ def create_app(
         prior_flags = [hf for hf in hist_flags if hf.submission_id != sub.id]
         doc_text = (snapshot.text if snapshot and snapshot.text else None) or sub.text or sub.extracted_text
         hints = compute_recurring_hints(flags, prior_flags, submission_text=doc_text)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        summary_sub = sub
+        if version is not None and version != sub.version and snapshot:
+            summary_sub = sub.model_copy(update={
+                "version": target_version,
+                "status": snapshot.status,
+                "processing_stage": "completed" if snapshot.status in {"manager_review", "final_approval", "approved"} else None,
+                "processing_error": None,
+            })
+        b_score, f_score, readiness = _review_summary(summary_sub, flags, decisions)
 
         return SubmissionDetailResponse(
             submission=sub,
@@ -1196,6 +1249,9 @@ def create_app(
         # Unresolved findings / error flag gating before approval
         current_flags = await app_repo.get_flags(id, version=sub.version)
         blocking = _blocking_flags(current_flags)
+        review_state = current_review_state(sub, current_flags)
+        if payload.decision == "approve" and review_state in {"not_checked", "review_in_progress", "review_incomplete"}:
+            raise HTTPException(409, "The current version has not completed a reliable check. Refresh or run the check before approval.")
         if payload.decision == "approve" and app_settings.enforce_approval_gates and blocking:
             reason = (payload.override_reason or "").strip()
             if not payload.override_unresolved or len(reason) < 10:
@@ -1222,6 +1278,9 @@ def create_app(
             sub.status = "draft"
             sub.version += 1
             sub.manager_approved_by = None
+            sub.processing_stage = None
+            sub.processing_error = None
+            sub.processing_job_id = None
         elif current_status == "manager_review":
             sub.status = "final_approval"
             if user:
@@ -1231,8 +1290,7 @@ def create_app(
 
         sub.updated_at = now_iso
         await app_repo.update_submission(sub)
-        if payload.decision == "approve":
-            await app_repo.save_version_snapshot(id, _snapshot_from_submission(sub))
+        await app_repo.save_version_snapshot(id, _snapshot_from_submission(sub))
 
         decision_obj = Decision(
             id=str(uuid.uuid4()),
@@ -1319,7 +1377,11 @@ def create_app(
         flags = await app_repo.get_flags(id, version=sub.version)
         decisions = await app_repo.get_decisions(id)
         audit = await app_repo.get_audit_events(id)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        b_score, f_score, readiness = _review_summary(sub, flags, decisions)
+        current_overrides = [
+            d for d in decisions
+            if d.version == sub.version and d.decision == "approve" and d.override_unresolved
+        ]
 
         external_urls = list(
             dict.fromkeys(
@@ -1352,6 +1414,7 @@ def create_app(
                 "brand_fidelity_score": b_score,
                 "fact_confidence_score": f_score,
                 "readiness_status": readiness,
+                "score_kind": "heuristic_indicator_not_probability",
                 "total_flags": len(flags),
                 "resolved_flags": sum(1 for f in flags if f.status in ("accepted", "dismissed", "resolved")),
                 "unresolved_blocking": len(_blocking_flags(flags)),
@@ -1361,6 +1424,13 @@ def create_app(
                 "external_sources_consulted": external_urls,
             },
             "decisions": [d.model_dump() for d in decisions if d.version == sub.version],
+            "publication_status": readiness,
+            "certificate_type": "publication_approval" if readiness in {"approved_for_publication", "approved_with_override"} else "review_status_report",
+            "remaining_risks": [
+                {"finding_id": f.id, "state": f.state, "passage": f.passage}
+                for f in _blocking_flags(flags)
+            ],
+            "override_justifications": [d.override_reason for d in current_overrides if d.override_reason],
             "audit_events_count": len(audit),
         }
 
@@ -1375,11 +1445,22 @@ def create_app(
         """Aggregate recurring compliance insights scoped to the active organisation."""
         user, _, org_id, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
         all_flags = await app_repo.get_all_flags(org_id=org_id if user else None)
+        submissions = await app_repo.list_submissions(org_id=org_id if user else None)
+        current_versions = {sub.id: sub.version for sub in submissions}
+        unique_issues: dict[tuple[str, str, str, str], Flag] = {}
+        for flag in all_flags:
+            if (flag.version != current_versions.get(flag.submission_id)
+                    or flag.status != "open" or flag.origin == "error"
+                    or flag.state not in {"potential_issue", "contradicted", "insufficient_evidence", "unclear"}):
+                continue
+            key = (flag.submission_id, flag.finding_type, flag.passage.strip(), flag.location)
+            unique_issues.setdefault(key, flag)
         guideline_counts: Counter[str] = Counter()
         state_counts: Counter[str] = Counter()
 
         for flag in all_flags:
             state_counts[flag.state] += 1
+        for flag in unique_issues.values():
             if flag.guideline_ref:
                 guideline_counts[
                     f"{flag.guideline_ref.document} - {flag.guideline_ref.passage_ref}"
@@ -1392,7 +1473,7 @@ def create_app(
 
         gov_dict = None
         try:
-            gov_out = generate_governance_insights(flags=all_flags)
+            gov_out = generate_governance_insights(flags=list(unique_issues.values()), total_reviews_analyzed=len(submissions))
             gov_dict = gov_out.model_dump()
         except Exception as exc:
             logger.warning("Governance insights generation failed: %s", exc)
@@ -1401,6 +1482,8 @@ def create_app(
             top_guidelines=top_guidelines,
             state_counts=dict(state_counts),
             total_flags=len(all_flags),
+            unique_open_issues=len(unique_issues),
+            affected_submissions=len({key[0] for key in unique_issues}),
             governance_insights=gov_dict,
         )
 
@@ -1411,7 +1494,14 @@ def create_app(
         """Generate executive governance intelligence scoped to the active organisation."""
         user, _, org_id, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
         all_flags = await app_repo.get_all_flags(org_id=org_id if user else None)
-        return generate_governance_insights(flags=all_flags)
+        submissions = await app_repo.list_submissions(org_id=org_id if user else None)
+        current_versions = {sub.id: sub.version for sub in submissions}
+        distinct: dict[tuple[str, str, str, str], Flag] = {}
+        for flag in all_flags:
+            if (flag.version == current_versions.get(flag.submission_id) and flag.status == "open"
+                    and flag.origin != "error" and flag.state in {"potential_issue", "contradicted", "insufficient_evidence", "unclear"}):
+                distinct.setdefault((flag.submission_id, flag.finding_type, flag.passage.strip(), flag.location), flag)
+        return generate_governance_insights(flags=list(distinct.values()), total_reviews_analyzed=len(submissions))
 
     @app.get("/disclosures", response_model=DisclosuresResponse)
     async def get_disclosures():
@@ -1519,41 +1609,45 @@ def create_app(
         role = effective_role if user else (claimed or "manager")
         require_role(role, {"manager"}, "approve guideline rectifications")
 
-        rect = await app_repo.get_rectification(org_id, rect_id)
-        if not rect:
-            raise HTTPException(404, "Guideline rectification proposal not found.")
-        if rect.status == "approved":
-            raise HTTPException(409, "This guideline rectification has already been approved.")
+        async with rectification_approval_lock:
+            rect = await app_repo.get_rectification(org_id, rect_id)
+            if not rect:
+                raise HTTPException(404, "Guideline rectification proposal not found.")
+            if rect.status != "pending":
+                raise HTTPException(409, "This proposal is already resolved or stale. Refresh and scan current guidelines.")
 
-        approved_text = (
-            payload.approved_wording.strip()
-            if payload and payload.approved_wording and payload.approved_wording.strip()
-            else rect.suggested_wording
-        )
-        actor_name = user.name if user else role
+            approved_text = payload.approved_wording.strip() if payload and payload.approved_wording else ""
+            if not approved_text or approved_text == rect.target_rule_text:
+                raise HTTPException(422, "A Manager must enter a changed rule after reviewing the source and any conflict; no policy wording is chosen automatically.")
+            actor_name = user.name if user else role
+            from retrieval.brand_rag import create_rectified_brand_doc_version
 
-        from retrieval.brand_rag import create_rectified_brand_doc_version
+            try:
+                new_doc = await run_in_threadpool(
+                    create_rectified_brand_doc_version,
+                    rect.document_id,
+                    rect.chunk_id,
+                    approved_text,
+                    org_id,
+                    actor_name,
+                    rect.document_version,
+                    rect.target_rule_text,
+                )
+            except ValueError as exc:
+                rect.status = "stale"
+                rect.invalidation_reason = str(exc)
+                await app_repo.update_rectification(rect)
+                raise HTTPException(409, f"{exc} Refresh and scan the current guideline version.")
 
-        try:
-            new_doc = await run_in_threadpool(
-                create_rectified_brand_doc_version,
-                rect.document_id,
-                rect.chunk_id,
-                approved_text,
-                org_id,
-                actor_name,
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-
-        rect.status = "approved"
-        rect.approved_wording = approved_text
-        rect.reviewed_by = actor_name
-        rect.reviewed_at = datetime.now(timezone.utc).isoformat()
-        rect.new_document_id = new_doc.id
-        rect.new_version = new_doc.version
-        await app_repo.update_rectification(rect)
-        return {"rectification": rect.model_dump(), "new_document": new_doc.model_dump()}
+            rect.status = "approved"
+            rect.approved_wording = approved_text
+            rect.reviewed_by = actor_name
+            rect.reviewed_at = datetime.now(timezone.utc).isoformat()
+            rect.new_document_id = new_doc.id
+            rect.new_version = new_doc.version
+            await app_repo.update_rectification(rect)
+            await app_repo.invalidate_rectifications(org_id, rect.document_id, rect.id)
+            return {"rectification": rect.model_dump(), "new_document": new_doc.model_dump()}
 
     @app.post("/brand-docs/rectifications/{rect_id}/dismiss")
     async def dismiss_guideline_rectification(
@@ -1608,10 +1702,11 @@ def create_app(
     ):
         """List active and preserved historical versions of a brand document."""
         _, _, org_id, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
-        from retrieval.brand_rag import list_brand_doc_versions
+        from retrieval.brand_rag import list_brand_doc_versions, list_brand_doc_events
 
         versions = await run_in_threadpool(list_brand_doc_versions, doc_id, org_id)
-        return {"versions": versions}
+        events = await run_in_threadpool(list_brand_doc_events, doc_id, org_id)
+        return {"versions": versions, "audit_events": events}
 
     @app.post("/brand-docs", status_code=status.HTTP_201_CREATED)
     async def upload_brand_document(
@@ -1650,7 +1745,10 @@ def create_app(
                 version=version.strip() or "1.0",
                 org_id=org_id,
                 brand_name=brand_name,
+                published_by=user.name if user else effective_role,
             )
+            if record.previous_version_id:
+                await app_repo.invalidate_rectifications(org_id, record.previous_version_id, "")
             return record.model_dump()
         except ValueError as exc:
             raise HTTPException(422, str(exc))

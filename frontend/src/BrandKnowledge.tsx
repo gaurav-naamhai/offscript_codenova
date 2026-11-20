@@ -155,7 +155,7 @@ export default function BrandKnowledge({
   }
 
   async function handleApproveRect(rect: GuidelineRectification) {
-    const wording = (editedWording[rect.id] ?? rect.suggested_wording).trim()
+    const wording = (editedWording[rect.id] ?? '').trim()
     if (!wording) return
     setBusyId(rect.id)
     setError('')
@@ -443,7 +443,7 @@ export default function BrandKnowledge({
           ) : (
             <div className="rect-list">
               {rectifications.map(r => {
-                const draftWording = editedWording[r.id] ?? r.suggested_wording
+                const draftWording = editedWording[r.id] ?? ''
                 return (
                   <article className="rect-card stagger-card" key={r.id}>
                     <div className="rect-card-head">
@@ -476,11 +476,12 @@ export default function BrandKnowledge({
                     {r.status === 'pending' ? (
                       canApproveRect ? (
                         <div className="rect-edit-area">
-                          <label htmlFor={`rect-${r.id}`}>Proposed clearer wording (Manager editable)</label>
+                          <label htmlFor={`rect-${r.id}`}>Manager-approved replacement for this rule</label>
                           <textarea
                             id={`rect-${r.id}`}
                             rows={3}
                             value={draftWording}
+                            placeholder="Enter the policy wording you have verified. Other rules in this chunk are preserved."
                             onChange={e => setEditedWording(prev => ({ ...prev, [r.id]: e.target.value }))}
                             disabled={busyId === r.id}
                           />
@@ -488,7 +489,7 @@ export default function BrandKnowledge({
                             <button
                               type="button"
                               className="primary-button"
-                              disabled={busyId === r.id || !draftWording.trim()}
+                              disabled={busyId === r.id || !draftWording.trim() || draftWording.trim() === (r.target_rule_text || r.original_text).trim()}
                               onClick={() => void handleApproveRect(r)}
                               style={{ padding: '8px 16px', fontSize: '13px' }}
                             >
@@ -506,13 +507,15 @@ export default function BrandKnowledge({
                         </div>
                       ) : (
                         <p className="workspace-muted">
-                          Suggested wording: &ldquo;{r.suggested_wording}&rdquo; — Manager approval required to publish a new guideline version.
+                          A Manager must decide and enter replacement wording before a new guideline version can be published.
                         </p>
                       )
                     ) : r.status === 'approved' ? (
                       <div className="workspace-notice" style={{ background: '#f0fdf4', color: '#166534', marginTop: '8px', fontSize: '13px' }}>
                         Approved by <strong>{r.reviewed_by || 'Manager'}</strong> → Published as <strong>v{r.new_version}</strong>: &ldquo;{r.approved_wording}&rdquo;
                       </div>
+                    ) : r.status === 'stale' ? (
+                      <p className="workspace-muted" role="status">This proposal is stale because its source guideline changed. Refresh and scan the current version before reviewing it again.</p>
                     ) : (
                       <p className="workspace-muted">Dismissed by {r.reviewed_by || 'Manager'}.</p>
                     )}

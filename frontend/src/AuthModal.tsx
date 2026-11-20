@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { serverApi } from './serverApi'
 import type { AuthUser, DemoAccount, DemoRole } from './serverApi'
@@ -26,23 +26,37 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
   const [role, setRole] = useState<DemoRole>('creator')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [accountLoading, setAccountLoading] = useState(true)
+  const [accountError, setAccountError] = useState('')
+  const [longWait, setLongWait] = useState(false)
+  const authInFlight = useRef(false)
 
-  useEffect(() => {
-    let active = true
-    void serverApi
-      .authAccounts()
-      .then((list) => {
-        if (active) setAccounts(list)
-      })
-      .catch(() => {
-        /* ignore if offline */
-      })
-    return () => {
-      active = false
+  const loadAccounts = useCallback(async () => {
+    setAccountLoading(true)
+    setAccountError('')
+    try {
+      setAccounts(await serverApi.authAccounts())
+    } catch (err) {
+      setAccountError(err instanceof Error ? err.message : 'Demo accounts could not be loaded.')
+    } finally {
+      setAccountLoading(false)
     }
   }, [])
 
+  useEffect(() => {
+    void loadAccounts()
+  }, [loadAccounts])
+
+  useEffect(() => {
+    setLongWait(false)
+    if (!busy && !accountLoading) return
+    const timer = window.setTimeout(() => setLongWait(true), 8000)
+    return () => window.clearTimeout(timer)
+  }, [busy, accountLoading])
+
   async function quickSignIn(acc: DemoAccount) {
+    if (authInFlight.current) return
+    authInFlight.current = true
     setBusy(true)
     setError('')
     try {
@@ -52,12 +66,15 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign-in failed.')
     } finally {
+      authInFlight.current = false
       setBusy(false)
     }
   }
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault()
+    if (authInFlight.current) return
+    authInFlight.current = true
     setBusy(true)
     setError('')
     try {
@@ -67,12 +84,15 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invalid credentials.')
     } finally {
+      authInFlight.current = false
       setBusy(false)
     }
   }
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault()
+    if (authInFlight.current) return
+    authInFlight.current = true
     setBusy(true)
     setError('')
     try {
@@ -88,6 +108,7 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed.')
     } finally {
+      authInFlight.current = false
       setBusy(false)
     }
   }
@@ -154,9 +175,18 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
           {error}
         </p>
       )}
+      {busy && <p role="status">{mode === 'register' ? 'Creating organisation…' : 'Signing in…'} {longWait && 'The service is still responding. This action has not been repeated.'}</p>}
 
       {mode === 'quick' ? (
         <div className="auth-org-groups">
+          {accountLoading && <p role="status">Loading demo accounts… {longWait && 'The service may be starting. You can use Email Sign In while it loads.'}</p>}
+          {!accountLoading && accountError && (
+            <div className="validation" role="alert">
+              <p>Demo accounts could not be loaded: {accountError}</p>
+              <button type="button" onClick={() => void loadAccounts()}>Retry loading accounts</button>
+            </div>
+          )}
+          {!accountLoading && !accountError && accounts.length === 0 && <p role="status">No demo accounts are available. Use Email Sign In or New Organisation.</p>}
           {Object.entries(orgGroups).map(([orgTitle, items]) => (
             <section className="auth-org-group" key={orgTitle}>
               <h3>{orgTitle}</h3>

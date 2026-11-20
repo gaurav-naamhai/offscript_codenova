@@ -243,6 +243,21 @@ def compile_brand_constitution(
 
     for line in lines:
         low = line.lower()
+        if re.search(r"\b(?:colou?r|palette|hex)\b", low) and (":" in low or re.search(r"#[0-9a-f]{6}\b", low)):
+            in_forbidden_block = False
+            in_preferred_block = False
+            continue
+        spelling_pair = re.search(
+            r"\b(?:avoid|do not use|never use)\s+[\"'“]([^\"'”]{2,40})[\"'”].*?\b(?:use|prefer|write)\s+[\"'“]([^\"'”]{2,40})[\"'”]",
+            line, re.IGNORECASE,
+        )
+        if spelling_pair:
+            bad, good = spelling_pair.group(1), spelling_pair.group(2)
+            if bad not in forbidden_terms:
+                forbidden_terms.append(bad)
+            if good not in preferred_terms:
+                preferred_terms.append(good)
+            continue
 
         # Section toggles
         if any(k in low for k in ("prohibited", "forbidden", "avoid", "never use", "do not use", "banned terms", "don't:")):

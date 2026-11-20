@@ -16,6 +16,8 @@ from pydantic import BaseModel
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
+timing_logger = logging.getLogger("uvicorn.error")
+REVIEW_HTTP_OPTIONS = {"api_version": "v1beta", "timeout": 60000, "retry_options": {"attempts": 1}}
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -104,7 +106,7 @@ class GeminiClient:
             try:
                 from google import genai
 
-                client_http_options: Dict[str, Any] = {"api_version": "v1beta"}
+                client_http_options: Dict[str, Any] = dict(REVIEW_HTTP_OPTIONS)
                 if http_options:
                     client_http_options.update(http_options)
 
@@ -200,7 +202,7 @@ class GeminiClient:
         config_args: Dict[str, Any] = {
             "response_mime_type": "application/json",
             "response_schema": response_schema,
-            "http_options": {"api_version": "v1beta"},
+            "http_options": REVIEW_HTTP_OPTIONS,
         }
         if system_instruction:
             config_args["system_instruction"] = system_instruction
@@ -220,8 +222,9 @@ class GeminiClient:
             response = None
             for model_idx, active_model in enumerate(models_to_try):
                 try:
-                    max_attempts = 3
+                    max_attempts = 2
                     for attempt in range(1, max_attempts + 1):
+                        started = time.perf_counter()
                         try:
                             response = self._client.models.generate_content(
                                 model=active_model,
@@ -252,6 +255,8 @@ class GeminiClient:
                                 time.sleep(1)
                                 continue
                             raise
+                        finally:
+                            timing_logger.info("Review model call schema=%s attempt=%d elapsed_ms=%.0f", response_schema.__name__, attempt, (time.perf_counter() - started) * 1000)
                     if active_model != self.model:
                         self.model = active_model
                     break

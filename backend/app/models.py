@@ -25,6 +25,7 @@ class ContentPayload:
     file_bytes: Optional[bytes] = None
     org_id: Optional[str] = None
     brand_name: Optional[str] = None
+    mock_mode: bool = False
     extracted_text: Optional[str] = None
     extracted_pages: Optional[List[dict]] = field(default=None)
 
@@ -290,6 +291,7 @@ class Submission(BaseModel):
     manager_approved_by: Optional[str] = None
     processing_stage: Optional[str] = None
     processing_error: Optional[str] = None
+    processing_job_id: Optional[str] = None
     extracted_text: Optional[str] = None
     title: Optional[str] = None
     audience: Optional[str] = None
@@ -347,6 +349,7 @@ class SubmissionListItem(BaseModel):
     created_at: str
     flag_count: int
     needs_human_count: int
+    readiness_status: str = "not_checked"
 
 
 class VersionInfo(BaseModel):
@@ -480,12 +483,15 @@ class SubmissionStatusResponse(BaseModel):
     progress_pct: int = 0
     flag_count: int = 0
     updated_at: str
+    readiness_status: str = "not_checked"
 
 
 class RecurringInsightsResponse(BaseModel):
     top_guidelines: List[Dict[str, object]]
     state_counts: Dict[str, int]
     total_flags: int
+    unique_open_issues: int = 0
+    affected_submissions: int = 0
     governance_insights: Optional[Dict[str, Any]] = None
 
 

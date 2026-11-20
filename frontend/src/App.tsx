@@ -8,13 +8,7 @@ import ReviewWorkspace from './ReviewWorkspace'
 import GlobalSearch from './GlobalSearch'
 import ReviewWorkflow from './ReviewWorkflow'
 import AuthModal from './AuthModal'
-import {
-  clearAuthSession,
-  DEFAULT_DEMO_ACCOUNT,
-  getStoredToken,
-  getStoredUser,
-  serverApi,
-} from './serverApi'
+import { AUTH_SESSION_EVENT, clearAuthSession, DEFAULT_DEMO_ACCOUNT, getStoredToken, getStoredUser, isAuthStorageKey, serverApi } from './serverApi'
 import type { AuthUser, DemoRole, SubmissionSummary } from './serverApi'
 import './App.css'
 import './ReviewLibrary.css'
@@ -307,11 +301,14 @@ function Hero({ onStart, onLibrary, brandName }: { onStart: () => void; onLibrar
         </div>
         <div className="eyebrow formats">Text · Images · PDF</div>
       </div>
-      <img
-        className="hero-art"
-        src={`${import.meta.env.BASE_URL}assets/hero-ribbon-document-wide.png`}
-        alt="Silver ribbon surrounding a document with a highlighted passage"
-      />
+      <span className="hero-art">
+        <img
+          className="hero-art-image"
+          src={`${import.meta.env.BASE_URL}assets/hero-ribbon-document-wide.png`}
+          alt="Silver ribbon surrounding a document with a highlighted passage"
+        />
+        <span className="hero-ribbon-glint" aria-hidden="true" />
+      </span>
     </section>
   )
 }
@@ -354,6 +351,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<Page>(initial.page)
   const [activeId, setActiveId] = useState<string | null>(initial.activeId)
+  const [checkStartError, setCheckStartError] = useState('')
   const [knowledgeTab, setKnowledgeTab] = useState<'docs' | 'rectify'>(initial.knowledgeTab)
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null)
@@ -377,6 +375,7 @@ function App() {
 
   // Dynamic Render backend wake-up monitor + automatic demo login
   useEffect(() => {
+
     let active = true
     const startedAt = Date.now()
     const tickTimer = window.setInterval(() => {
@@ -444,12 +443,57 @@ function App() {
 
     void probeAndConnect()
 
+
     return () => {
       active = false
       window.clearInterval(tickTimer)
       if (retryTimer !== null) window.clearTimeout(retryTimer)
     }
   }, [])
+
+  // Auth changes in another tab invalidate its old role, organisation, and open record here.
+  useEffect(() => {
+    let timer: number | undefined
+    const reconcile = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const token = getStoredToken()
+        const next = token ? getStoredUser() : null
+        if (!next) {
+          setUser(null)
+          setSubmissions([])
+          setActiveId(null)
+          setSearchOpen(false)
+          setAuthModalOpen(false)
+          setError(null)
+          return
+        }
+        if (next.user_id !== user?.user_id || next.org_id !== user?.org_id || next.role !== user?.role) {
+          setSubmissions([])
+          setActiveId(null)
+          setSelectedDocument(null)
+          setSearchOpen(false)
+          setError(null)
+          setPage('dashboard')
+          writeHashRoute('dashboard', null)
+        }
+        setUser(next)
+        void serverApi.me().then(verified => {
+          if (getStoredToken() === token) setUser(verified)
+        }).catch(() => {
+          if (getStoredToken() === token) clearAuthSession()
+        })
+      }, 0)
+    }
+    const onStorage = (event: StorageEvent) => { if (isAuthStorageKey(event.key)) reconcile() }
+    window.addEventListener('storage', onStorage)
+    window.addEventListener(AUTH_SESSION_EVENT, reconcile)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener(AUTH_SESSION_EVENT, reconcile)
+    }
+  }, [user?.user_id, user?.org_id, user?.role])
 
   // Sync URL hash changes (supports browser back/forward & page refresh on saved reviews)
   useEffect(() => {
@@ -473,6 +517,7 @@ function App() {
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
   }, [])
+
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -637,6 +682,7 @@ function App() {
             activeId ? (
               <ReviewWorkspace
                 submissionId={activeId}
+                initialCheckError={checkStartError}
                 user={user}
                 onSwitchAccount={() => setAuthModalOpen(true)}
                 onReturn={() => {
@@ -656,7 +702,8 @@ function App() {
               <NewReview
                 user={user}
                 onSwitchAccount={() => setAuthModalOpen(true)}
-                onCreated={id => {
+                onCreated={(id, checkError) => {
+                  setCheckStartError(checkError || '')
                   setActiveId(id)
                   setPage('review')
                   writeHashRoute('review', id)

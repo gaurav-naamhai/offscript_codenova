@@ -242,6 +242,17 @@ def validate_and_ground_findings(
             f.guideline_document_id = matched_g.document_id
             f.page_number = matched_g.page_number
             f.similarity = matched_g.similarity
+            if (f.state == "potential_issue" and matched_g.category == "approved_fact"
+                    and re.search(r"unsupported|unverified|no evidence|not approved", f.explanation or "", re.I)):
+                from app.ai.guideline_rectification import _expired_date
+                normalize = lambda value: " ".join(re.findall(r"[a-z0-9]+(?:%|\.[0-9]+)?", value.lower()))
+                passage = normalize(f.passage or "")
+                if (len(passage) >= 12 and passage in normalize(matched_g.excerpt or "")
+                        and not _expired_date(matched_g.excerpt or "")):
+                    f.state = "aligned"
+                    f.explanation = "This passage matches a current approved internal fact."
+                    f.suggested_fix = None
+                    f.uncertainty_note = None
             # Validate exact violated passage: must be verbatim substring of retrieved chunk
             verified_vp = extract_verbatim_guideline_passage(
                 f.exact_violated_passage, matched_g.excerpt

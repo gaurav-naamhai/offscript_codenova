@@ -29,6 +29,7 @@ from app.models import (
     FlagDraft,
     FlaggedSpan,
     GuidelineRef,
+    InternalEvidence,
     SuggestionDetails,
 )
 from app.uncertainty import needs_human
@@ -103,10 +104,13 @@ def validate_and_ground_claim_findings(
             excerpt = getattr(matched_ev, "excerpt", "") or ""
 
             # Rule: A valid URL alone does not make a finding valid if status is unavailable or text is empty
-            if status == "unavailable" or not excerpt.strip():
+            if (status == "unavailable" or not excerpt.strip()
+                    or getattr(matched_ev, "entity_matched", True) is False
+                    or getattr(matched_ev, "relevance_score", 1.0) < 0.12):
                 logger.warning("Cited URL '%s' has status='unavailable' or empty excerpt. Converting to 'insufficient_evidence'.", cited_url)
                 f.state = "insufficient_evidence"
                 f.evidence_quality = "insufficient"
+                f.suggested_fix = None
                 f.uncertainty_note = f"Source URL '{cited_url}' was unreachable or returned empty text. Human verification required."
                 f.external_sources = [ExternalSource(url=cited_url, excerpt="Source text unavailable.")]
                 grounded_findings.append(f)
@@ -129,6 +133,7 @@ def validate_and_ground_claim_findings(
             )
             f.state = "insufficient_evidence"
             f.evidence_quality = "none"
+            f.suggested_fix = None
             f.uncertainty_note = (
                 f"Unverified external source: The cited URL '{f.evidence_source_url}' was not present "
                 f"in the retrieved evidence. Flagged as insufficient evidence for human review."
@@ -148,18 +153,23 @@ def _match_claim_to_internal_facts(
     """Check whether retrieved approved brand guidelines/facts directly substantiate or cover a claim."""
     if not guidelines or not claim_text:
         return []
-    claim_tokens = {
-        t for t in re.findall(r"[a-z0-9%]{3,}", claim_text.lower())
-        if t not in {"the", "and", "for", "with", "our", "that", "this", "from", "are"}
-    }
-    if not claim_tokens:
+    def normalized(value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+(?:%|\.[0-9]+)?", value.lower()))
+
+    claim = normalized(claim_text)
+    if len(claim) < 12:
         return []
     matched: List[GuidelineRef] = []
+    from app.ai.guideline_rectification import _expired_date
     for g in guidelines:
-        exc_tokens = set(re.findall(r"[a-z0-9%]{3,}", (g.excerpt or "").lower()))
-        overlap = claim_tokens.intersection(exc_tokens)
-        is_fact_doc = (g.category or "") in ("approved_fact", "fact") or (g.match_type or "") == "approved_fact"
-        if len(overlap) >= 2 or (is_fact_doc and len(overlap) >= 1):
+        if (g.category or "").lower() not in {"approved_fact", "fact"} and not re.search(r"\bapproved\s+facts?\s*:", g.excerpt or "", re.I):
+            continue
+        if _expired_date(g.excerpt or ""):
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+|\n+", g.excerpt or "")
+        sentences = [re.sub(r"^\s*approved\s+facts?\s*:\s*", "", s, flags=re.I) for s in sentences]
+        # A substring can reverse meaning (for example, "not 20% off").
+        if any(claim == normalized(sentence) for sentence in sentences):
             matched.append(g)
     return matched
 
@@ -207,7 +217,7 @@ def verify_claims_against_evidence(
                     return verify_claim_externally(q, max_sources=3, brand_name=brand_name)
                 return verify_claim_externally(q, max_sources=3)
 
-            claims_to_fetch = [c for c in target_claims[:4]]
+            claims_to_fetch = [c for c in target_claims[:4] if not internal_fact_matches[c.claim_id]]
             if claims_to_fetch:
                 with ThreadPoolExecutor(max_workers=min(3, len(claims_to_fetch))) as pool:
                     futures = {
@@ -240,6 +250,9 @@ def verify_claims_against_evidence(
             )
         output.findings = validate_and_ground_claim_findings(output.findings, all_evidence_items)
         return output
+
+    if all(internal_fact_matches[c.claim_id] for c in target_claims):
+        return _generate_mock_claim_verification(target_claims, {}, internal_fact_matches)
 
     # 2. Live Gemini Execution
     brand_facts_context = ""
@@ -302,8 +315,52 @@ def verify_claims_against_evidence(
 
     # Post-validation: ground findings against authoritative evidence and enforce supported -> no fix
     output.findings = validate_and_ground_claim_findings(output.findings, all_evidence_items)
+    for claim in target_claims:
+        refs = internal_fact_matches[claim.claim_id]
+        if not refs:
+            continue
+        finding = next((f for f in output.findings if f.claim_text == claim.text), None)
+        if finding is None:
+            finding = _generate_mock_claim_verification([claim], {}, {claim.claim_id: refs}).findings[0]
+            output.findings.append(finding)
+        else:
+            finding.state = "supported"
+            finding.explanation = f"Claim matches approved brand document '{refs[0].document}' ({refs[0].passage_ref})."
+            finding.evidence_excerpt = refs[0].excerpt[:400]
+            finding.evidence_source_url = None
+            finding.external_sources = []
+            finding.suggested_fix = None
     for f in output.findings:
+        internally_supported = any(c.text == f.claim_text and internal_fact_matches[c.claim_id] for c in target_claims)
+        externally_grounded = bool(f.evidence_source_url and any(
+            getattr(ev, "url", "").lower() == f.evidence_source_url.lower()
+            and getattr(ev, "status", "ok") == "ok"
+            and getattr(ev, "entity_matched", True) is not False
+            and getattr(ev, "relevance_score", 1.0) >= 0.12
+            and bool(getattr(ev, "excerpt", "").strip())
+            for ev in all_evidence_items
+        ))
+        # A reachable, reputable page can still be about a different claim.
+        # Require the exact factual statement in the retrieved excerpt before
+        # reporting external support; paraphrases need human review.
+        if f.state == "supported" and externally_grounded:
+            claim_words = " ".join(re.findall(r"[a-z0-9]+(?:%|\.[0-9]+)?", f.claim_text.lower()))
+            externally_grounded = bool(claim_words and any(
+                getattr(ev, "url", "").lower() == (f.evidence_source_url or "").lower()
+                and claim_words in " ".join(re.findall(
+                    r"[a-z0-9]+(?:%|\.[0-9]+)?", (getattr(ev, "excerpt", "") or "").lower()
+                ))
+                for ev in all_evidence_items
+            ))
+        if f.state in {"supported", "contradicted"} and not (internally_supported or externally_grounded):
+            f.state = "insufficient_evidence"
+            f.evidence_quality = "insufficient"
+            f.uncertainty_note = "No approved internal fact or relevant retrieved source grounds this assessment. Human verification is required."
+            f.suggested_fix = None
         if f.state == "supported":
+            f.suggested_fix = None
+        elif not internally_supported:
+            # A source verdict alone cannot establish safe replacement wording.
             f.suggested_fix = None
     return output
 
@@ -343,6 +400,7 @@ def verify_claims(
 def claim_finding_to_flag_draft(
     finding: ClaimFinding,
     full_text: Optional[str] = None,
+    internal_guideline: Optional[GuidelineRef] = None,
 ) -> FlagDraft:
     """Convert a ClaimFinding directly to domain FlagDraft model.
 
@@ -385,7 +443,12 @@ def claim_finding_to_flag_draft(
         for s in ext_sources
     ]
 
-    mode = "external_only" if ext_evidence else ("insufficient_evidence" if finding.state == "insufficient_evidence" else "external_only")
+    internal_evidence = [InternalEvidence(
+        document=internal_guideline.document, document_id=internal_guideline.document_id,
+        chunk_id=internal_guideline.chunk_id, section=internal_guideline.section or internal_guideline.passage_ref,
+        retrieved_chunk_text=internal_guideline.excerpt,
+    )] if internal_guideline else []
+    mode = "internal_only" if internal_evidence else ("external_only" if ext_evidence else "insufficient_evidence")
 
     sug = None
     if finding.suggested_fix:
@@ -398,8 +461,8 @@ def claim_finding_to_flag_draft(
         location=span.location_label or finding.location,
         explanation=finding.explanation,
         why_it_matters=finding.why_it_matters,
-        guideline_ref=None,
-        guideline_refs=[],
+        guideline_ref=internal_guideline,
+        guideline_refs=[internal_guideline] if internal_guideline else [],
         external_sources=ext_sources,
         uncertainty_note=finding.uncertainty_note,
         suggested_correction=finding.suggested_fix,
@@ -407,7 +470,7 @@ def claim_finding_to_flag_draft(
         status="open",
         comments=[],
         evidence_mode=mode,
-        internal_evidence=[],
+        internal_evidence=internal_evidence,
         external_evidence=ext_evidence,
         exact_violated_passage=finding.exact_violated_passage,
         flagged_span=span,
@@ -450,7 +513,7 @@ def _evaluate_contextual_freshness(claim_text: str, published_date: Optional[str
         )
     )
 
-    current_year = 2026
+    current_year = datetime.now(timezone.utc).year
     if is_contemporary and pub_year:
         # If the claim is about contemporary/current performance and the source is >= 2 years old (pre-2025)
         if (current_year - pub_year) >= 2:
@@ -558,7 +621,7 @@ def _generate_mock_claim_verification(
                         evidence_excerpt=excerpt,
                         evidence_quality="outdated",
                         uncertainty_note=f"Outdated evidence from {pub_date}; cannot substantiate current-year performance.",
-                        suggested_fix="verified in recent benchmarks",
+                        suggested_fix=None,
                         external_sources=[ExternalSource(url=url, excerpt=excerpt)],
                     )
                 )
@@ -611,7 +674,7 @@ def _generate_mock_claim_verification(
                         evidence_excerpt=excerpt,
                         evidence_quality="reliable",
                         uncertainty_note="Verified third-party evaluations directly refute market supremacy.",
-                        suggested_fix="a top-tier market provider",
+                        suggested_fix=None,
                         external_sources=[ExternalSource(url=url, excerpt=excerpt)],
                     )
                 )
@@ -624,6 +687,9 @@ def _generate_mock_claim_verification(
             has_substantive_excerpt = bool(excerpt and len(excerpt.strip()) >= 20)
             is_ok = (status == "ok")
             quality = "reliable" if (has_domain and has_substantive_excerpt and is_ok) else "insufficient"
+            claim_words = re.findall(r"[a-z0-9]+(?:%|\.[0-9]+)?", c.text.lower())
+            excerpt_words = " ".join(re.findall(r"[a-z0-9]+(?:%|\.[0-9]+)?", excerpt.lower()))
+            direct_support = bool(claim_words and " ".join(claim_words) in excerpt_words)
 
             # Supported claim with reliable evidence
             findings.append(
@@ -631,13 +697,13 @@ def _generate_mock_claim_verification(
                     claim_text=c.text,
                     passage=c.passage,
                     location=c.location,
-                    state="supported",
-                    explanation="Factual statement matches verified SLA benchmarks and third-party audit reports.",
+                    state="supported" if direct_support and quality == "reliable" else "insufficient_evidence",
+                    explanation="Retrieved excerpt directly states this claim." if direct_support and quality == "reliable" else "The retrieved source does not directly substantiate the exact claim; human verification is required.",
                     why_it_matters="Verifiable factual claims build credibility and protect against compliance penalties.",
                     evidence_source_url=url,
                     evidence_excerpt=excerpt,
                     evidence_quality=quality,
-                    uncertainty_note=None,
+                    uncertainty_note=None if direct_support and quality == "reliable" else "Source reliability and claim relevance are separate; this excerpt does not prove the specific statement.",
                     suggested_fix=None,
                     external_sources=[ExternalSource(url=url, excerpt=excerpt)],
                 )
@@ -658,7 +724,7 @@ def _generate_mock_claim_verification(
                     evidence_excerpt=None,
                     evidence_quality="none",
                     uncertainty_note="No external benchmark was supplied to substantiate this metric. Human review required.",
-                    suggested_fix="industry-leading verified performance",
+                    suggested_fix=None,
                     external_sources=[],
                 )
             )
@@ -668,14 +734,14 @@ def _generate_mock_claim_verification(
                     claim_text=c.text,
                     passage=c.passage,
                     location=c.location,
-                    state="contradicted",
-                    explanation="Absolute supremacy ranking claim contradicts third-party market share evaluations.",
+                    state="insufficient_evidence",
+                    explanation="Absolute supremacy ranking claim has no supporting independent evidence.",
                     why_it_matters="Unqualified supremacy declarations require audited independent industry market reports.",
                     evidence_source_url=None,
                     evidence_excerpt=None,
                     evidence_quality="none",
                     uncertainty_note="Global supremacy declaration lacks mandatory audited market share evidence.",
-                    suggested_fix="a top-tier market provider",
+                    suggested_fix=None,
                     external_sources=[],
                 )
             )
@@ -692,7 +758,7 @@ def _generate_mock_claim_verification(
                     evidence_excerpt=None,
                     evidence_quality="none",
                     uncertainty_note="Guarantees require explicit limitation disclosures.",
-                    suggested_fix="targeted high availability",
+                    suggested_fix=None,
                     external_sources=[],
                 )
             )
@@ -702,13 +768,13 @@ def _generate_mock_claim_verification(
                     claim_text=c.text,
                     passage=c.passage,
                     location=c.location,
-                    state="supported",
-                    explanation="Factual statement conforms to standard descriptive business communications.",
+                    state="insufficient_evidence",
+                    explanation="No approved internal fact or directly relevant external evidence substantiates this claim.",
                     why_it_matters="Clear and truthful communication reinforces audience trust.",
                     evidence_source_url=None,
                     evidence_excerpt=None,
                     evidence_quality="none",
-                    uncertainty_note=None,
+                    uncertainty_note="A human reviewer must verify this factual statement before publication.",
                     suggested_fix=None,
                     external_sources=[],
                 )

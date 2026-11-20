@@ -267,6 +267,7 @@ def recheck_correction(
         )
     except Exception as exc:
         logger.warning("Content understanding recheck warning: %s", exc)
+        return False, "Recheck incomplete: Content understanding failed; human review is required."
 
     # 6. Brand Verification Recheck
     effective_guidelines = guidelines or ([guideline_ref] if guideline_ref else [])
@@ -287,6 +288,9 @@ def recheck_correction(
                 )
         except Exception as exc:
             logger.warning("Brand verification recheck warning: %s", exc)
+            return False, "Recheck incomplete: Brand verification failed; human review is required."
+    elif finding_type == "brand":
+        return False, "Recheck incomplete: No governing brand guideline was supplied."
 
     # 7. Claim Verification Recheck
     target_claims = [c for c in (cu_out.claims if cu_out else []) if c.claim_type in ("fact", "mixed")]
@@ -311,6 +315,7 @@ def recheck_correction(
                     )
         except Exception as exc:
             logger.warning("Claim verification recheck warning: %s", exc)
+            return False, "Recheck incomplete: Claim verification failed; human review is required."
 
     return (
         True,
@@ -462,8 +467,8 @@ def generate_correction(
         client=ai_client,
     )
 
-    if not passed and notes and "Anti-fabrication guard" in notes:
-        # Never surface invented product descriptions or fabricated metrics as a suggested replacement
+    if not passed:
+        # Never surface a candidate that the recheck could not verify.
         candidate.suggested_replacement = passage
         candidate.change_rationale = (
             f"{notes} Retaining original passage so a human editor can revise safely."
@@ -589,6 +594,10 @@ def _generate_mock_correction(
         evidence_map=evidence_map,
         client=client,
     )
+
+    if not passed:
+        replacement = passage
+        rationale = f"No correction was verified. {notes} A human editor must review the wording."
 
     _, preserved_list, _ = check_entity_preservation(
         original_passage=passage,

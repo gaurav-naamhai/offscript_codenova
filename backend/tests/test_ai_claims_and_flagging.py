@@ -60,7 +60,7 @@ class TestExternalClaimVerification(unittest.TestCase):
             domain="status.example.com",
             published_date="2026-01-15",
             retrieved_at="2026-11-13T12:00:00Z",
-            excerpt="Audited historical SLA performance proves 99.9% availability across all zones.",
+            excerpt="Audited historical record: Service provides 99.9% uptime historically.",
             status="ok",
         )
         evidence_map = {"claim-1": [evidence]}
@@ -155,7 +155,7 @@ class TestExternalClaimVerification(unittest.TestCase):
         self.assertEqual(finding.state, "contradicted")
         self.assertEqual(finding.evidence_quality, "reliable")
         self.assertTrue(needs_human(finding.state))
-        self.assertIsNotNone(finding.suggested_fix)
+        self.assertIsNone(finding.suggested_fix)
 
     def test_contextual_freshness_historical_vs_contemporary(self):
         """Historical facts remain valid with older sources; contemporary benchmarks require recent sources."""
@@ -173,7 +173,7 @@ class TestExternalClaimVerification(unittest.TestCase):
             domain="history.example.com",
             published_date="2012-05-20",
             retrieved_at="2026-11-13T12:00:00Z",
-            excerpt="Inkloom was founded in 2012 as an open research laboratory.",
+            excerpt="Archived record: Inkloom was founded in 2012 by researchers.",
             status="ok",
         )
         res_hist = verify_claims_against_evidence(

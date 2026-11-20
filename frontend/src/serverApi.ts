@@ -40,6 +40,8 @@ export type RecurringInsights = {
   top_guidelines: Record<string, unknown>[]
   state_counts: Record<string, number>
   total_flags: number
+  unique_open_issues?: number
+  affected_submissions?: number
   governance_insights?: GovernanceInsights | null
 }
 
@@ -83,6 +85,7 @@ export type SubmissionSummary = {
   created_at: string
   flag_count: number
   needs_human_count: number
+  readiness_status?: string
 }
 
 export type EvidenceMode = 'internal_only' | 'external_only' | 'combined' | 'insufficient_evidence'
@@ -300,12 +303,14 @@ export type GuidelineRectification = {
   chunk_id: string
   section?: string | null
   original_text: string
+  target_rule_text?: string | null
   conflicting_document?: string | null
   conflicting_text?: string | null
   problem_explanation: string
   suggested_wording: string
   evidence_count: number
-  status: 'pending' | 'approved' | 'dismissed'
+  status: 'pending' | 'approved' | 'dismissed' | 'stale'
+  invalidation_reason?: string | null
   approved_wording?: string | null
   reviewed_by?: string | null
   reviewed_at?: string | null
@@ -330,6 +335,8 @@ export type ComplianceCertificate = {
 
 const TOKEN_KEY = 'inkloom_auth_token'
 const USER_KEY = 'inkloom_auth_user'
+export const AUTH_SESSION_EVENT = 'inkloom-auth-session-changed'
+export const isAuthStorageKey = (key: string | null) => key === null || key === TOKEN_KEY || key === USER_KEY
 
 export function getStoredToken(): string {
   try {
@@ -352,6 +359,7 @@ export function setAuthSession(token: string, user: AuthUser): void {
   try {
     window.localStorage.setItem(TOKEN_KEY, token)
     window.localStorage.setItem(USER_KEY, JSON.stringify(user))
+    window.dispatchEvent(new Event(AUTH_SESSION_EVENT))
   } catch {
     // ignore storage quota failures
   }
@@ -361,6 +369,7 @@ export function clearAuthSession(): void {
   try {
     window.localStorage.removeItem(TOKEN_KEY)
     window.localStorage.removeItem(USER_KEY)
+    window.dispatchEvent(new Event(AUTH_SESSION_EVENT))
   } catch {
     // ignore
   }
@@ -387,9 +396,9 @@ function submission(value: unknown): ServerSubmission {
   return s as ServerSubmission
 }
 
-async function request(path: string, init?: RequestInit): Promise<Response> {
+async function request(path: string, init?: RequestInit, timeoutMs = 90000): Promise<Response> {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), 90000)
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
     const headers = new Headers(init?.headers)
     const token = getStoredToken()
@@ -442,7 +451,7 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 
 export const serverApi = {
   async authAccounts(): Promise<DemoAccount[]> {
-    const data = (await (await request('/auth/accounts')).json()) as { accounts?: DemoAccount[] }
+    const data = (await (await request('/auth/accounts', undefined, 150000)).json()) as { accounts?: DemoAccount[] }
     return data.accounts || []
   },
 
@@ -452,7 +461,7 @@ export const serverApi = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-      })
+      }, 150000)
     ).json()) as { access_token: string; user: AuthUser }
     setAuthSession(res.access_token, res.user)
     return res
@@ -553,7 +562,7 @@ export const serverApi = {
   },
 
   async status(id: string): Promise<SubmissionStatus> {
-    return (await (await request(`/submissions/${encodeURIComponent(id)}/status`)).json()) as SubmissionStatus
+    return (await (await request(`/submissions/${encodeURIComponent(id)}/status`, undefined, 20000)).json()) as SubmissionStatus
   },
 
   async retryCheck(id: string, asyncMode = true): Promise<CheckResult> {

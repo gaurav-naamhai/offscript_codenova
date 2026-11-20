@@ -8,7 +8,7 @@ for Manager review and versioned publication.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import logging
 import re
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from app.ai.client import GeminiClient
 from app.models import Flag
 from app.uncertainty import needs_human
-from retrieval.chunker import detect_expiry_hint
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +38,14 @@ class GuidelineRectification(BaseModel):
     chunk_id: str
     section: Optional[str] = None
     original_text: str
+    target_rule_text: Optional[str] = None
     conflicting_document: Optional[str] = None
     conflicting_text: Optional[str] = None
     problem_explanation: str
     suggested_wording: str
     evidence_count: int = 0
-    status: Literal["pending", "approved", "dismissed"] = "pending"
+    status: Literal["pending", "approved", "dismissed", "stale"] = "pending"
+    invalidation_reason: Optional[str] = None
     approved_wording: Optional[str] = None
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
@@ -88,6 +89,8 @@ def _jaccard(a: Set[str], b: Set[str]) -> float:
 def _count_chunk_escalations(historical_flags: List[Flag]) -> Dict[str, int]:
     counts: Counter[str] = Counter()
     for f in historical_flags:
+        if f.status != "open" or f.origin == "error":
+            continue
         if not (needs_human(f.state) or f.state == "unclear"):
             continue
         if f.guideline_ref:
@@ -100,42 +103,42 @@ def _count_chunk_escalations(historical_flags: List[Flag]) -> Dict[str, int]:
 
 def _suggest_clearer_wording(original: str, issue_type: RectificationIssueType, extra: str = "") -> str:
     clean = (original or "").strip()
-    if issue_type == "expired":
-        updated = re.sub(
-            r"\b20(?:1\d|2[0-5])\b",
-            "2026 (confirm current cycle)",
-            clean,
-        )
-        if updated == clean:
-            updated = f"{clean} [Update effective dates or archive if superseded for 2026+]"
-        return updated
-    if issue_type == "duplicate":
-        return f"Consolidated single rule (archive duplicate copy): {clean}"
-    if issue_type == "conflicting":
-        return (
-            f"Clarified standard (reconciling conflict {extra}): {clean} — "
-            "Specify which channel or audience takes precedence."
-        )
-    # Unclear rule: replace vague modifiers with measurable criteria
-    rewritten = clean
-    replacements = {
-        "appropriate": "approved (matching the brand lexicon and WCAG 2.1 AA thresholds)",
-        "reasonable": "verifiable with cited data",
-        "good judgment": "documented escalation to a brand manager when evidence is missing",
-        "good judgement": "documented escalation to a brand manager when evidence is missing",
-        "as needed": "when factual claims, statistics, or guarantees appear",
-        "where possible": "for all published customer-facing assets",
-        "etc.": "(see explicit approved list)",
-    }
-    for old, new in replacements.items():
-        if old in rewritten.lower():
-            rewritten = re.sub(re.escape(old), new, rewritten, flags=re.IGNORECASE)
-    if rewritten == clean:
-        rewritten = (
-            f"{clean} [Specify concrete do/don't examples and measurable pass criteria so creators "
-            "and reviewers apply this consistently.]"
-        )
-    return rewritten
+    # Keep the complete chunk intact. A Manager must provide the policy decision;
+    # automatic date or vague-word substitutions can change unrelated rules.
+    return clean
+
+
+def _expired_date(text: str, today: Optional[date] = None) -> Optional[date]:
+    """Return a past explicit end date; unknown or future dates are not expired."""
+    today = today or datetime.now(timezone.utc).date()
+    marker = re.search(r"\b(?:expires?|expired|valid\s+(?:until|through)|ends?|ended|effective\s+(?:until|through))\b", text, re.I)
+    if not marker:
+        return None
+    tail = text[marker.end():marker.end() + 65]
+    candidates = re.findall(r"\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b|\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b|\b[A-Za-z]+\s+\d{1,2},?\s+\d{4}\b|\b20\d{2}\b", tail)
+    for candidate in candidates:
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y"):
+            try:
+                parsed = datetime.strptime(candidate, fmt).date()
+                return parsed if parsed < today else None
+            except ValueError:
+                continue
+        if re.fullmatch(r"20\d{2}", candidate):
+            # A year-only expiry is not definite until that entire year has passed.
+            parsed = date(int(candidate), 12, 31)
+            return parsed if parsed < today else None
+    return None
+
+
+def _atomic_rules(text: str) -> List[str]:
+    """Split rule lines and sentence boundaries without treating headings as rules."""
+    units: List[str] = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if not line or (len(line) < 45 and not re.search(r"[.!?]$|^(?:use|must|never|avoid|do not|always|expires|offer)\b", line, re.I)):
+            continue
+        units.extend(part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Z])", line) if len(part.strip()) >= 12)
+    return units
 
 
 def _detect_conflict_pair(text_a: str, text_b: str) -> Optional[str]:
@@ -161,6 +164,11 @@ def _detect_conflict_pair(text_a: str, text_b: str) -> Optional[str]:
     nums_a = set(re.findall(r"\b\d+(?:\.\d+)?%|\b\d+px\b|\$\d+(?:\.\d+)?", la))
     nums_b = set(re.findall(r"\b\d+(?:\.\d+)?%|\b\d+px\b|\$\d+(?:\.\d+)?", lb))
     if nums_a and nums_b and nums_a != nums_b and _jaccard(tok_a, tok_b) >= 0.30:
+        # A ceiling and a prohibited out-of-range example are compatible.
+        if ("maximum" in la or "up to" in la or "at most" in la) and ("never" in lb or "do not" in lb or "prohibited" in lb):
+            return None
+        if ("maximum" in lb or "up to" in lb or "at most" in lb) and ("never" in la or "do not" in la or "prohibited" in la):
+            return None
         return f"conflicting numeric thresholds ({', '.join(sorted(nums_a))} vs {', '.join(sorted(nums_b))})"
 
     return None
@@ -192,8 +200,9 @@ def scan_guidelines_for_rectification(
         content = (c.get("content") or "").strip()
         if not content:
             continue
-        has_exp, hint = detect_expiry_hint(content)
-        if has_exp:
+        expired = next((d for unit in (_atomic_rules(content) or [content]) if (d := _expired_date(unit))), None)
+        if expired:
+            hint = expired.isoformat()
             cid = str(c.get("id") or c.get("chunk_id"))
             _add(
                 GuidelineRectification(
@@ -207,8 +216,9 @@ def scan_guidelines_for_rectification(
                     chunk_id=cid,
                     section=c.get("section"),
                     original_text=content,
+                    target_rule_text=next((unit for unit in (_atomic_rules(content) or [content]) if _expired_date(unit)), content),
                     problem_explanation=(
-                        f"Rule appears outdated or time-bounded ({hint}). "
+                        f"Rule has an explicit past end date ({hint}). "
                         "Expired campaign rules cause false warnings or outdated claims in current reviews."
                     ),
                     suggested_wording=_suggest_clearer_wording(content, "expired"),
@@ -229,12 +239,9 @@ def scan_guidelines_for_rectification(
         raw_txt = (c.get("content") or "").strip()
         if not raw_txt:
             continue
-        paras = [p.strip() for p in re.split(r"\n\s*\n", raw_txt) if len(p.strip()) >= 20]
-        if len(paras) > 1:
-            for p_idx, para in enumerate(paras):
-                rule_units.append({**c, "_unit_text": para, "_body_text": _strip_heading_prefix(para), "_unit_key": f"{c.get('id') or c.get('chunk_id')}#{p_idx}"})
-        else:
-            rule_units.append({**c, "_unit_text": raw_txt, "_body_text": _strip_heading_prefix(raw_txt), "_unit_key": str(c.get("id") or c.get("chunk_id"))})
+        for p_idx, rule in enumerate(_atomic_rules(raw_txt)):
+            rule_units.append({**c, "_unit_text": rule, "_body_text": rule,
+                               "_full_text": raw_txt, "_unit_key": f"{c.get('id') or c.get('chunk_id')}#{p_idx}"})
 
     n = len(rule_units)
     for i in range(n):
@@ -243,7 +250,7 @@ def scan_guidelines_for_rectification(
         body_i = ci["_body_text"]
         key_i = ci["_unit_key"]
         tok_i = _norm_tokens(body_i)
-        if not txt_i or len(tok_i) < 4:
+        if not txt_i or len(tok_i) < 2:
             continue
 
         for j in range(i + 1, n):
@@ -271,6 +278,7 @@ def scan_guidelines_for_rectification(
                         chunk_id=cid_j,
                         section=cj.get("section"),
                         original_text=txt_j,
+                        target_rule_text=txt_j,
                         conflicting_document=f"{ci.get('doc_title', 'Guideline')} ({ci.get('section') or 'General'})",
                         conflicting_text=txt_i[:300],
                         problem_explanation=(
@@ -299,6 +307,7 @@ def scan_guidelines_for_rectification(
                         chunk_id=cid_j,
                         section=cj.get("section"),
                         original_text=txt_j,
+                        target_rule_text=txt_j,
                         conflicting_document=f"{ci.get('doc_title', 'Guideline')} ({ci.get('section') or 'General'})",
                         conflicting_text=txt_i[:300],
                         problem_explanation=(
@@ -341,6 +350,7 @@ def scan_guidelines_for_rectification(
                     chunk_id=cid,
                     section=c.get("section"),
                     original_text=content,
+                    target_rule_text=next((unit for unit in (_atomic_rules(content) or [content]) if any(term in unit.lower() for term in vague_hits)), content),
                     problem_explanation=f"Ambiguous rule: {' and '.join(reasons)}.",
                     suggested_wording=_suggest_clearer_wording(content, "unclear"),
                     evidence_count=max(1, esc_hit_count),

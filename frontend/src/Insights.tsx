@@ -62,8 +62,9 @@ export default function Insights({
       {!loading && data && (
         <>
           <div className="panel ki-total stagger-card">
-            <span>Total compliance flags evaluated ({user.brand_name})</span>
-            <strong>{data.total_flags}</strong>
+            <span>Open issues in current versions ({user.brand_name})</span>
+            <strong>{data.unique_open_issues ?? 'Unavailable'}</strong>
+            <small>{data.affected_submissions ?? 'Unavailable'} affected submissions · {data.total_flags} finding events across checks and versions</small>
           </div>
 
           {gov && (

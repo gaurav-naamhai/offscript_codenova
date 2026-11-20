@@ -78,10 +78,9 @@ class TestAISuggestionsAndCorrections(unittest.TestCase):
         )
 
         self.assertIsInstance(correction, CorrectionOutput)
-        self.assertIn("effective collaboration", correction.suggested_replacement.lower())
-        self.assertNotIn("disruptive synergy", correction.suggested_replacement.lower())
-        self.assertTrue(correction.recheck_passed)
-        self.assertIn("Brand Playbook", correction.change_rationale)
+        self.assertFalse(correction.recheck_passed)
+        self.assertEqual(correction.suggested_replacement, flag.passage)
+        self.assertIn("human editor", correction.change_rationale.lower())
 
     def test_entity_protection_preserves_numbers_and_names(self):
         """Protected entities (names, numbers, dates) present in passage must be preserved."""
@@ -106,7 +105,8 @@ class TestAISuggestionsAndCorrections(unittest.TestCase):
         self.assertIn("99.9%", correction.suggested_replacement)
         self.assertIn("Inkloom AI", correction.entities_preserved)
         self.assertIn("99.9%", correction.entities_preserved)
-        self.assertTrue(correction.recheck_passed)
+        self.assertFalse(correction.recheck_passed)
+        self.assertEqual(correction.suggested_replacement, passage)
 
     def test_entity_protection_fails_if_candidate_drops_protected_entity(self):
         """Programmatic recheck must fail if candidate correction strips a protected date or metric."""
@@ -167,10 +167,9 @@ class TestAISuggestionsAndCorrections(unittest.TestCase):
             client=self.mock_client,
         )
 
-        self.assertNotIn("#1", correction.suggested_replacement)
-        self.assertIn("recognized", correction.suggested_replacement.lower())
-        self.assertTrue(correction.recheck_passed)
-        self.assertIn("contradicted supremacy claim", correction.change_rationale.lower())
+        self.assertEqual(correction.suggested_replacement, contradicted_flag.passage)
+        self.assertFalse(correction.recheck_passed)
+        self.assertIn("human editor", correction.change_rationale.lower())
 
     def test_recheck_detects_new_forbidden_superlative(self):
         """Programmatic recheck catches if a candidate replacement introduces a new absolute superlative."""
@@ -265,7 +264,7 @@ class TestAISuggestionsAndCorrections(unittest.TestCase):
         self.assertFalse(passed_c)
         self.assertIn("superlative", notes_c.lower())
 
-        # 3. Clean candidate replacement -> recheck passes
+        # 3. A stylistically clean candidate still needs factual support.
         clean_candidate = "We deliver effective collaboration across our product suite."
         passed_clean, notes_clean = recheck_correction(
             original_passage="Old text.",
@@ -275,8 +274,8 @@ class TestAISuggestionsAndCorrections(unittest.TestCase):
             guidelines=guidelines,
             client=self.mock_client,
         )
-        self.assertTrue(passed_clean)
-        self.assertIn("recheck passed", notes_clean.lower())
+        self.assertFalse(passed_clean)
+        self.assertIn("unverified", notes_clean.lower())
 
     def test_batch_generate_corrections(self):
         """Batch generation produces structured SuggestionsOutput for all non-aligned issues."""

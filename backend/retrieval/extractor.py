@@ -37,7 +37,7 @@ def _ocr_image_bytes(image_bytes: bytes, mime_type: str = "image/png") -> str:
                     ),
                 ],
                 config=types.GenerateContentConfig(
-                    http_options={"api_version": "v1beta"},
+                    http_options={"api_version": "v1beta", "timeout": 60000, "retry_options": {"attempts": 1}},
                 ),
             )
             return (response.text or "").strip()

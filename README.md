@@ -1,5 +1,13 @@
 # Inkloom AI — Intelligent Brand Governance Platform (Team OFFSCRIPT)
 
+## Current implementation and verification
+
+The review UI supports text, image and PDF submissions, organisation-scoped guideline retrieval, findings, version history, and Creator → Manager → Authorised Reviewer decisions. A new or edited draft is **not checked** until its current version completes review; an incomplete check is not an approval. A justified override remains visible with its unresolved risks. The certificate endpoint exports a status report or approval record as JSON; it is **not cryptographically signed**.
+
+Active organisation guidelines are used when retrieval is configured. Generic fixture rules are available only in explicit mock mode, and a retrieval failure is reported as incomplete rather than silently substituted. Claims require matching approved facts or relevant evidence; unapproved company domains cannot substantiate an organisation-specific offer. External source metadata and lexical relevance do not alone prove a claim. The review provider, OCR, web search, and database paths still need live-service validation. See [backend testing notes](backend/TESTING_NOTES.md) for tested scope and deployment checks.
+
+The earlier Round 2 mapping below records the team's historical work; its old test counts and performance statements are superseded by the testing notes.
+
 > **See tomorrow's headline today, and fix the mistake before it reaches your customers.**
 
 Inkloom AI is an intelligent pre-publication brand-governance platform built for organisations publishing across multiple teams, agencies, and AI tools. Organisations perform a one-time upload of their approved brand guidelines, facts, and identity assets; creators can then submit text drafts, images, or PDFs to be verified against **both** their isolated internal brand knowledge base and live external evidence — with explainable, evidence-first findings, minimal intent-preserving corrections, recurring-mistake coaching, guideline rectification, and strict role-based human approval.
@@ -13,7 +21,7 @@ Growing organisations produce content across employees, agencies, and generative
 
 ### How OFFSCRIPT Solves It
 1. **One-Time Brand Constitution Setup (Org-Isolated):** Upload brand PDFs, images, or text playbooks once. Inkloom chunks rules semantically, tags rule categories (`approved_fact`, `terminology`, `tone`, `visual`, `claim_policy`, `legal`) and expiry hints, builds an auto-compiled **Brand Constitution** (approved facts, forbidden terms, official color swatches), and indexes 768-dim embeddings in Supabase `pgvector` strictly isolated per organisation.
-2. **Primary Brand-vs-External Review Lens:** Reviewers and creators choose immediately whether to inspect **"What went wrong vs. your brand"** (Supabase Hybrid RAG) or **"What went wrong vs. external facts"** (Exa Search + TinyFish verification), backed by a unified Evidence-First finding card layout.
+2. **Review findings:** The interface groups brand and claim findings with their available internal and external evidence. Missing or incomplete evidence remains visible for human review.
 3. **Explainable Flags & Anti-Fabrication Corrections:** Every flag anchors to exact character spans (`FlaggedSpan`), verbatim guideline passages, or external URLs. Candidate corrections undergo programmatic entity protection and anti-fabrication validation before surfacing.
 4. **Proactive Recurring-Mistake Coaching:** Detects repeated mistakes both live while typing (`POST /submissions/draft-hints`) and post-review (`recurring_hints` with line numbers and historical frequency).
 5. **Guideline Rectification Loop:** Audits active brand guidelines for **unclear**, **conflicting**, **duplicate**, and **expired** rules; lets a Manager edit and approve clearer wording, automatically publishing a new active guideline version (`v1.0 → v1.1`) while preserving previous versions.
@@ -48,9 +56,9 @@ flowchart LR
 
 ### Main Technical Decisions
 - **Multi-Stage Hybrid Brand RAG (`backend/retrieval/brand_rag.py` & `chunker.py`):** Pure cosine vector search often misses exact banned words, numbers, or product specs, while naive chunking splits mid-rule. We implemented rule-aware semantic chunking (`rule_category`, keywords, expiry detection) combined with query decomposition, pgvector similarity, lexical/exact-term scoring, approved-fact boosting, relevance thresholding, and strict per-organisation filtering.
-- **Organisation Isolation on Existing Supabase Schema:** Encodes `org_id`, `brand_name`, and `previous_version_id` in `brand_documents.storage_path` plus deterministic inference for legacy rows, keeping BrightLeaf, Nike, and other workspaces 100% isolated without breaking existing table schemas.
+- **Organisation-Scoped Retrieval:** Brand document queries are scoped to an organisation and active version. Publication and synthetic legacy backfill after migrations 001 and 002 passed disposable PostgreSQL tests. See [testing notes](backend/TESTING_NOTES.md) before rollout.
 - **Approved Brand Facts Priority & Unrelated-Company Filtering (`claim_verification.py`, `external_search.py`):** Claims about the organisation's own products/policies check approved internal facts first; external search results referencing unrelated companies or off-topic domains are rejected as `entity_matched=False` rather than causing false contradictions.
-- **Single-Pass Extraction & Concurrent Async Pipeline (`pipeline.py`, `main.py`):** PDF/image text extraction and Gemini `ContentUnderstanding` run once per submission, followed by parallel `ThreadPoolExecutor` execution of brand verification and claim verification. Frontend runs checks with `async_mode=true` and polls `GET /submissions/{id}/status` every 1.4s so large PDFs/images never trigger HTTP timeouts and can be safely retried on error.
+- **Extraction & Background Review (`pipeline.py`, `main.py`):** PDF/image extraction is shared with parallel brand and claim checks. The frontend starts a saved check, then polls status sequentially; failed or abandoned checks retain their submission ID for an explicit retry. An unreadable file is incomplete, and a server restart still loses in-memory submissions.
 - **Deterministic Guardrails Over Raw LLM Outputs:**
   - *WCAG Contrast Math (`visual_accessibility.py`):* Re-computes contrast ratios via `evaluate_wcag_contrast()` and drops false-positive contrast warnings when pairs already pass WCAG 2.1 AA (`>= 4.5:1` normal, `>= 3.0:1` large/UI).
   - *Anti-Fabrication (`suggestions_corrections.py`):* Rejects candidate rewrites that introduce ungrounded numeric specs, unverified multi-word entities, or bloated product descriptions.
@@ -64,7 +72,7 @@ flowchart LR
 |---|---|---|
 | **Frontend** | React 19, TypeScript, Vite 8, `@fontsource/dm-serif-display`, `@fontsource/manrope`, CSS Motion (`motion.css`) | Minimal motion UI, URL hash routing, local unsent-draft persistence, Brand-vs-External lens selector, async stepper, Brand Constitution & Guideline Rectification screens |
 | **Backend API** | FastAPI, Pydantic v2, Uvicorn, Starlette threadpool + background worker, HMAC-SHA256 stateless auth | REST API, RBAC, org isolation, approval gates, immutable version snapshots, audit log, WCAG contrast endpoint, compliance certificate export |
-| **AI Models** | Google GenAI SDK (`google-genai`), `gemini-2.5-flash` (with automatic `gemini-2.0-flash` fallback & explicit offline `MOCK_AI` test mode), `gemini-embedding-001` (768-dim) | Multimodal text/image/PDF understanding, OCR fallback for scanned pages, claim & brand assessment, entity-preserving suggestions, governance insights |
+| **AI Models** | Google GenAI SDK (`google-genai`), provider/model configuration in backend settings, explicit offline `MOCK_AI` test mode | Multimodal text/image/PDF understanding, OCR fallback, claim and brand assessment; live provider accuracy remains to be verified |
 | **Database & RAG** | Supabase (`supabase-py`), PostgreSQL + `pgvector` (`match_brand_chunks` RPC), thread-safe in-memory repository fallback | Brand document/chunk storage, vector similarity search, submission/version/comment/decision/audit persistence |
 | **Document & OCR** | PyMuPDF (`pymupdf` / `fitz`), Gemini Vision OCR | Digital PDF extraction, 130-DPI rasterization for scanned PDF pages & visual PDF rendering, quantized image color palette sampling |
 | **External Evidence** | Exa Search (`api.exa.ai/search`), TinyFish (`TinySearch` & `TinyFetch`), `httpx` | External claim discovery, full-page markdown retrieval, publication-date extraction, timeout/unavailable degradation |
@@ -97,9 +105,9 @@ flowchart LR
 ## 6. Verification & Running Locally
 
 ### Observed Verification Results
-- **Backend Automated Tests (`pytest`):** **172 passed, 0 failed** (`172 passed in 7.30s` covering all 163 core/AI/integration tests + 9 Round 2 governance, security, RAG, rectification, contrast-filter, and async journey tests).
+- **Backend Automated Tests (`pytest`):** **196 passed** on 20 November 2026 using synthetic/local fixtures. See [testing notes](backend/TESTING_NOTES.md) for scope and limitations.
 - **Live Supabase Isolation Check:** Verified `list_brand_docs(org_id='brightleaf')` returns `['BrightLeaf-guidelines']` and `list_brand_docs(org_id='nike')` returns `['nike_brand_identity_detailed', 'identity']` with zero cross-org leakage.
-- **Frontend Build & Lint:** `tsc -b && vite build` passed with **0 errors**; `oxlint` passed with **0 errors** across 19 files.
+- **Frontend Build:** `tsc -b && vite build` passed on 20 November 2026. Lint was not rerun for this update.
 
 ### Quick Start
 ```bash
@@ -115,9 +123,7 @@ npm run dev
 ```
 
 ### Demo Sign-In Accounts (Grouped by Organisation)
-- **BrightLeaf Organics:** `creator@brightleaf.co` / `manager@brightleaf.co` / `reviewer@brightleaf.co` (password: `brightleaf123`)
-- **Nike Demo:** `creator@nike.demo` / `manager@nike.demo` / `reviewer@nike.demo` (password: `nike123`)
-- **Inkloom Workspace:** `creator@inkloom.ai` / `manager@inkloom.ai` / `reviewer@inkloom.ai` (password: `inkloom123`)
+The sign-in screen fetches the currently available demo identities from the backend. These are demonstration accounts, not production account security or a durable identity store.
 
 ---
 

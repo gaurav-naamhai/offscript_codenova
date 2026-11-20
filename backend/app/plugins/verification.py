@@ -123,6 +123,7 @@ def verify_claims(
 
     if use_ai:
         from app.ai.claim_verification import (
+            _match_claim_to_internal_facts,
             claim_finding_to_flag_draft,
             verify_claims as ai_verify_claims,
         )
@@ -144,7 +145,9 @@ def verify_claims(
                 )
                 if not ok_fix:
                     f.suggested_fix = None
-            flags.append(claim_finding_to_flag_draft(f, full_text=full_txt))
+            refs = _match_claim_to_internal_facts(f.claim_text, guidelines) if f.state == "supported" else []
+            flags.append(claim_finding_to_flag_draft(f, full_text=full_txt,
+                                                     internal_guideline=refs[0] if refs else None))
         if flags:
             return flags
         # When AI ran cleanly and found zero factual claims requiring flags, return supported notice

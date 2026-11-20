@@ -65,7 +65,7 @@ function FilePicker({ format, file, onFile, error }: { format: 'Image' | 'PDF'; 
         <input ref={input} className="sr-only" type="file" accept={format === 'Image' ? 'image/png,image/jpeg,image/webp' : 'application/pdf,.pdf'} onChange={selectFile} aria-label={`Choose ${format} file`} tabIndex={-1} />
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <p className="field-hint">Files are processed asynchronously so large PDFs and images never time out.</p>
+      <p className="field-hint">The file uploads first, then its review runs in the background. Processing time depends on extraction and connected services.</p>
     </div>
   )
 }
@@ -99,7 +99,7 @@ export default function NewReview({
   onSwitchAccount,
 }: {
   user: AuthUser
-  onCreated: (id: string) => void
+  onCreated: (id: string, checkError?: string) => void
   onSwitchAccount: () => void
 }) {
   const storageKey = `inkloom_unsent_draft_${user.org_id}`
@@ -111,8 +111,15 @@ export default function NewReview({
   const [fileError, setFileError] = useState('')
   const [busy, setBusy] = useState(false)
   const [statusMessage, setStatusMessage] = useState('')
+  const [longSubmitWait, setLongSubmitWait] = useState(false)
   const [liveHints, setLiveHints] = useState<RecurringHint[]>([])
   const submitting = useRef(false)
+
+  useEffect(() => {
+    if (!busy) return
+    const timer = window.setTimeout(() => setLongSubmitWait(true), 8000)
+    return () => window.clearTimeout(timer)
+  }, [busy])
 
   // Persist unsent draft cleanly across refreshes
   useEffect(() => {
@@ -189,7 +196,8 @@ export default function NewReview({
 
     submitting.current = true
     setBusy(true)
-    setStatusMessage('Uploading & starting background compliance check…')
+    setLongSubmitWait(false)
+    setStatusMessage(draft.format === 'Text' ? 'Submitting content…' : 'Uploading file…')
     try {
       const type = draft.format.toLowerCase() as ContentType
       const created = await serverApi.create(
@@ -201,17 +209,25 @@ export default function NewReview({
         draft.channel,
         draft.context.trim() || undefined
       )
+      setStatusMessage('Starting review on the saved submission…')
       try {
         window.localStorage.removeItem(storageKey)
       } catch {
         // ignore
       }
-      await serverApi.checkAsync(created.id)
-      onCreated(created.id)
+      let checkError: string | undefined
+      try {
+        await serverApi.checkAsync(created.id)
+      } catch (err) {
+        // Creation succeeded. Open the authoritative record so a timed-out check
+        // can be inspected or retried without creating another submission.
+        checkError = err instanceof Error ? err.message : 'The check could not be started.'
+      }
+      onCreated(created.id, checkError)
     } catch (err) {
       setBusy(false)
       setStatusMessage('')
-      setErrors([err instanceof Error ? err.message : 'Submission failed. Verify server connection and try again.'])
+      setErrors([`${err instanceof Error ? err.message : 'Submission could not be confirmed.'} Check Review Library before submitting again; a timed-out create request may have succeeded.`])
     } finally {
       submitting.current = false
     }
@@ -222,7 +238,7 @@ export default function NewReview({
       <header className="review-intro">
         <h1>Bring your next draft.</h1>
         <p>
-          Reviewing strictly against <strong>{user.brand_name}</strong> approved guidelines and verified facts.
+          Review can use available <strong>{user.brand_name}</strong> guidelines and relevant external evidence. Incomplete checks are flagged.
         </p>
       </header>
 
@@ -276,12 +292,13 @@ export default function NewReview({
 
         <div className="review-side">
           <DraftPreview draft={draft} file={currentFile} url={currentUrl} />
-          <p>Only {user.brand_name}’s active guidelines and verified relevant sources are consulted.</p>
+          <p>Available {user.brand_name} guidelines and relevant sources may be consulted. Incomplete checks are flagged.</p>
         </div>
       </div>
 
       <div role="status" aria-live="polite" aria-atomic="true">
         {statusMessage && <p className="save-feedback">{statusMessage}</p>}
+        {busy && longSubmitWait && <p className="save-feedback">Still waiting for the service. Please keep this page open; the request has not been repeated.</p>}
       </div>
 
       {errors.length > 0 && (

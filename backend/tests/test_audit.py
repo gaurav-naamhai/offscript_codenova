@@ -26,11 +26,12 @@ def test_audit_trail_captures_all_events(client, monkeypatch):
         json={"role": "manager", "text": "Looks decent overall."},
     )
 
-    # 4. Decision recorded event
-    client.post(
+    # 4. An incomplete check cannot be approved; a change request is still auditable.
+    decision = client.post(
         f"/submissions/{sub_id}/decision",
-        json={"role": "manager", "decision": "approve"},
+        json={"role": "manager", "decision": "request_changes"},
     )
+    assert decision.status_code == 200
 
     # Fetch audit
     audit_res = client.get(f"/submissions/{sub_id}/audit")

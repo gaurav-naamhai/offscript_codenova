@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import inspect
 import logging
+from time import perf_counter
 from typing import Callable, List, Optional, Tuple
 import uuid
 
@@ -13,6 +14,7 @@ from app.plugins import brand_check, retrieval, verification
 from app.uncertainty import needs_human
 
 logger = logging.getLogger(__name__)
+timing_logger = logging.getLogger("uvicorn.error")
 
 
 def _draft_to_flag(draft: FlagDraft, submission_id: str, version: int, now_iso: str) -> Flag:
@@ -97,8 +99,15 @@ def run_pipeline(
     flags: List[Flag] = []
     degraded_modules: List[DegradedModule] = []
     now_iso = datetime.now(timezone.utc).isoformat()
+    stage_started = perf_counter()
+    current_stage: Optional[str] = None
 
     def _notify(stage: str) -> None:
+        nonlocal stage_started, current_stage
+        now = perf_counter()
+        if current_stage:
+            timing_logger.info("Review stage %s submission=%s version=%s elapsed_ms=%.0f", current_stage, submission_id, version, (now - stage_started) * 1000)
+        current_stage, stage_started = stage, now
         if progress_cb:
             try:
                 progress_cb(stage)
@@ -109,9 +118,17 @@ def run_pipeline(
     v_fn = verification_fn or verification.verify_claims
     b_fn = brand_check_fn or brand_check.check_brand
 
+    def _timed_plugin(name: str, fn: Callable, *args):
+        started = perf_counter()
+        try:
+            return fn(*args)
+        finally:
+            timing_logger.info("Review plugin %s submission=%s version=%s elapsed_ms=%.0f", name, submission_id, version, (perf_counter() - started) * 1000)
+
     # 0. Pre-extract text once for PDF / Image so RAG, verification, and brand check share it
     _notify("extracting")
     if content.content_type in ("pdf", "image") and content.file_bytes and not getattr(content, "extracted_text", None):
+        extraction_error: Optional[str] = None
         try:
             from retrieval.extractor import extract_from_payload
             from retrieval.schemas import ContentPayload as RetrievalPayload
@@ -128,6 +145,11 @@ def run_pipeline(
                 content.extracted_text = extracted
         except Exception as exc:
             logger.warning("Pre-extraction failed (%s): %s", content.content_type, exc)
+            extraction_error = type(exc).__name__
+        if not content.extracted_text:
+            degraded_modules.append(DegradedModule(module="extraction", error=extraction_error or "NoReadableText"))
+            flags.append(_make_error_flag("extraction", submission_id, version, now_iso,
+                                          detail="No readable text was extracted; file content needs manual review."))
 
     # 1. Retrieval (org-isolated Brand RAG)
     _notify("retrieving_guidelines")
@@ -164,8 +186,8 @@ def run_pipeline(
     candidate_drafts: List[FlagDraft] = []
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        v_fut = pool.submit(_call_verification, v_fn, content, guidelines, shared_cu)
-        b_fut = pool.submit(_call_brand_check, b_fn, content, guidelines, shared_cu)
+        v_fut = pool.submit(_timed_plugin, "verification", _call_verification, v_fn, content, guidelines, shared_cu)
+        b_fut = pool.submit(_timed_plugin, "brand_check", _call_brand_check, b_fn, content, guidelines, shared_cu)
 
         try:
             raw_claims = v_fut.result()

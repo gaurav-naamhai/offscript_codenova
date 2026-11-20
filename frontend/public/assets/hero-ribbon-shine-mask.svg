@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1942 809">
+  <defs>
+    <mask id="exclude-document" maskUnits="userSpaceOnUse" x="0" y="0" width="1942" height="809" style="mask-type:luminance">
+      <rect width="1942" height="809" fill="white"/>
+      <path d="M 825 80 L 1295 0 L 1158 660 L 610 720 Z" fill="black"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke="white" stroke-linecap="round" stroke-linejoin="round">
+    <g mask="url(#exclude-document)">
+      <path stroke-width="72" d="M 42 425 C 180 304 384 170 575 188 C 666 195 737 244 757 307 C 767 345 737 378 683 407"/>
+      <path stroke-width="76" d="M 1214 480 C 1356 412 1508 330 1663 332 C 1791 333 1879 384 1892 462 C 1902 520 1855 577 1779 622"/>
+    </g>
+    <path stroke-width="74" d="M 74 521 C 210 574 332 516 472 485 C 574 461 661 480 764 541 C 890 620 1052 689 1234 707 C 1435 726 1642 689 1791 617"/>
+  </g>
+</svg>

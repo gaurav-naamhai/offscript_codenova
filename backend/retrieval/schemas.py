@@ -60,6 +60,8 @@ class BrandDocumentRecord(BaseModel):
     org_id: str = "inkloom"
     brand_name: Optional[str] = None
     previous_version_id: Optional[str] = None
+    family_id: Optional[str] = None
+    revision: Optional[int] = None
     constitution: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
 

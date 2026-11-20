@@ -10,6 +10,7 @@ import type {
   SubmissionStatus,
   VersionInfo,
 } from './serverApi'
+import { readinessExplanation, readinessLabel } from './reviewReadiness'
 import './ReviewWorkspace.css'
 
 type ReviewLens = 'brand' | 'claim' | 'all'
@@ -39,6 +40,7 @@ function DiffText({ tokens, changes, kind }: { tokens: string[]; changes: Set<nu
 
 export default function ReviewWorkspace({
   submissionId,
+  initialCheckError,
   user,
   onSwitchAccount,
   onReturn,
@@ -46,6 +48,7 @@ export default function ReviewWorkspace({
   onRefreshList,
 }: {
   submissionId: string
+  initialCheckError?: string
   user: AuthUser
   onSwitchAccount: () => void
   onReturn: () => void
@@ -69,10 +72,12 @@ export default function ReviewWorkspace({
   const [overrideReason, setOverrideReason] = useState('')
   const [recheckPreview, setRecheckPreview] = useState<{ flagId: string; result: RecheckResult } | null>(null)
   const [liveStatus, setLiveStatus] = useState<SubmissionStatus | null>(null)
+  const [pollError, setPollError] = useState('')
+  const [longProcessing, setLongProcessing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState(initialCheckError ? `Submission saved. Check start could not be confirmed: ${initialCheckError} Inspect its status before retrying; a second submission is unnecessary.` : '')
 
   const loadData = useCallback(async (targetVersion?: number | null) => {
     try {
@@ -102,8 +107,10 @@ export default function ReviewWorkspace({
           })
         }
       }
+      return true
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load submission.')
+      return false
     } finally {
       setLoading(false)
     }
@@ -129,26 +136,37 @@ export default function ReviewWorkspace({
       return () => window.clearTimeout(clearTimer)
     }
     let active = true
-    const poll = () => {
-      void serverApi
-        .status(submissionId)
-        .then(st => {
-          if (!active) return
-          setLiveStatus(st)
-          if (st.status !== 'ai_review') {
-            void loadData(null)
-            onRefreshList?.()
-          }
-        })
-        .catch(() => {
-          /* ignore transient poll error */
-        })
+    let timer: number | undefined
+    let consecutiveErrors = 0
+    setLongProcessing(false)
+    setPollError('')
+    const waitTimer = window.setTimeout(() => { if (active) setLongProcessing(true) }, 25000)
+    const poll = async () => {
+      try {
+        const st = await serverApi.status(submissionId)
+        if (!active) return
+        consecutiveErrors = 0
+        setPollError('')
+        setLiveStatus(st)
+        if (st.status !== 'ai_review') {
+          if (!await loadData(null)) throw new Error('Review finished, but its results could not be loaded. Retrying the saved record.')
+          if (active) onRefreshList?.()
+          return
+        }
+      } catch (err) {
+        if (!active) return
+        consecutiveErrors++
+        if (consecutiveErrors >= 2) {
+          setPollError(err instanceof Error ? err.message : 'Could not refresh review status.')
+        }
+      }
+      if (active) timer = window.setTimeout(() => void poll(), consecutiveErrors ? 5000 : 2500)
     }
-    poll()
-    const interval = window.setInterval(poll, 1400)
+    void poll()
     return () => {
       active = false
-      window.clearInterval(interval)
+      window.clearTimeout(timer)
+      window.clearTimeout(waitTimer)
     }
   }, [currentSubStatus, submissionId, loadData, onRefreshList])
 
@@ -365,20 +383,23 @@ export default function ReviewWorkspace({
   const sub = detail.submission
   const activeSnapshot = detail.version_snapshot
   const isHistoricalView = viewingVersion != null && viewingVersion !== sub.version
+  const displayStatus = isHistoricalView ? activeSnapshot?.status || 'archived' : sub.status
+  const displayStage = isHistoricalView ? (['manager_review', 'final_approval', 'approved'].includes(displayStatus) ? 'completed' : null) : sub.processing_stage
+  const displayVersion = isHistoricalView ? viewingVersion : sub.version
   const displayedText = (activeSnapshot?.text ?? sub.text) || ''
   const displayedFileName = activeSnapshot?.file_name ?? sub.file_name
   const flags = detail.flags
   const recurringHints = detail.recurring_hints || []
   const blockingCount = detail.unresolved_blocking_count ?? flags.filter(f => f.status === 'open' && (f.origin === 'error' || ['potential_issue', 'contradicted', 'insufficient_evidence', 'unclear'].includes(f.state))).length
   const hasBlockingError = flags.some(f => f.status === 'open' && f.origin === 'error')
-  const isSafeToPost = blockingCount === 0 && !hasBlockingError
-  const rawBrandScore = detail.brand_score ?? 100
-  const rawFactScore = detail.fact_score ?? 100
-  const aiConfidence = isSafeToPost
-    ? Math.round((rawBrandScore + rawFactScore) / 2)
-    : Math.min(rawBrandScore, rawFactScore)
-  const confidenceTier = aiConfidence >= 85 && isSafeToPost ? 'High' : aiConfidence >= 60 ? 'Medium' : 'Low'
-  const confidenceColor = confidenceTier === 'High' ? '#166534' : confidenceTier === 'Medium' ? '#92400e' : '#b91c1c'
+  const readiness = hasBlockingError || displayStage === 'failed' || displayStage === 'incomplete'
+    ? 'review_incomplete'
+    : displayStatus === 'draft'
+      ? 'not_checked'
+      : displayStatus === 'ai_review'
+        ? 'review_in_progress'
+        : detail.readiness_status || 'not_checked'
+  const overrideDecisions = detail.decisions.filter(d => d.version === displayVersion && d.decision === 'approve' && d.override_unresolved)
 
   const otherChecks = flags.filter(f => ['aligned', 'supported'].includes(f.state) && f.origin !== 'error')
   const actionableFindings = flags.filter(f => !otherChecks.includes(f))
@@ -400,7 +421,6 @@ export default function ReviewWorkspace({
   const selectedFlag = flags.find(f => f.id === selectedId)
   const latestRequestChanges = [...detail.decisions].reverse().find(d => d.decision === 'request_changes')
   const stage = liveStatus?.processing_stage || sub.processing_stage || 'extracting'
-  const progressPct = liveStatus?.progress_pct ?? (sub.status === 'ai_review' ? 35 : 100)
   const stageOrder = ['extracting', 'retrieving_guidelines', 'verifying_and_assessing', 'synthesizing']
   const currentStageIdx =
     stage === 'understanding_content'
@@ -672,19 +692,19 @@ export default function ReviewWorkspace({
           <h1>{sub.title || 'Untitled submission'}</h1>
           <p>
             Format: <strong>{sub.content_type.toUpperCase()}</strong> · Status:{' '}
-            <strong style={{ color: sub.status === 'approved' ? '#6be092' : '#dec9f2' }}>
-              {sub.status.replace('_', ' ').toUpperCase()}
+            <strong style={{ color: readiness.startsWith('approved') ? '#6be092' : '#dec9f2' }}>
+              {readinessLabel(readiness, displayStatus, displayStage)}
             </strong>{' '}
             · Current <strong>v{sub.version}</strong>
             {isHistoricalView && ` (Viewing archived v${viewingVersion})`}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {sub.status === 'approved' && (
+          {!isHistoricalView && (readiness === 'approved_for_publication' || readiness === 'approved_with_override') ? (
             <button type="button" className="workspace-outline" onClick={() => void handleExportCertificate()}>
               Export certificate
             </button>
-          )}
+          ) : null}
           {onNewReview && (
             <button type="button" className="workspace-outline" onClick={onNewReview}>
               New review
@@ -696,50 +716,38 @@ export default function ReviewWorkspace({
         </div>
       </header>
 
-      {/* Simple Safe-to-Post & AI Confidence Summary */}
-      {sub.status !== 'ai_review' && (
-        <div className="readiness-strip">
-          <div className="readiness-stat">
-            <div className="readiness-stat-label">
-              <span>Posting Status</span>
-              <small>
-                {hasBlockingError
-                  ? 'A check could not complete cleanly'
-                  : isSafeToPost
-                    ? 'No unresolved issues found'
-                    : `${blockingCount} issue${blockingCount > 1 ? 's' : ''} must be fixed or overridden`}
-              </small>
-            </div>
-            <strong style={{ color: isSafeToPost ? '#166534' : '#b91c1c' }}>
-              {isSafeToPost ? 'Safe to post' : 'Not safe to post'}
-            </strong>
+      <div className="readiness-strip" role="status">
+        <div className="readiness-stat">
+          <div className="readiness-stat-label">
+            <span>Current version</span>
+            <small>{readinessExplanation(readiness)}</small>
           </div>
-          <div className="readiness-stat">
-            <div className="readiness-stat-label">
-              <span>AI Confidence</span>
-              <small>
-                {isSafeToPost
-                  ? 'Content aligns with guidelines and facts'
-                  : 'Lowered because mistakes or unverified claims were found'}
-              </small>
-            </div>
-            <strong style={{ color: confidenceColor }}>
-              {confidenceTier} ({aiConfidence}%)
-            </strong>
-          </div>
+          <strong>{readinessLabel(readiness, displayStatus, displayStage)}</strong>
         </div>
-      )}
+        <div className="readiness-stat">
+          <div className="readiness-stat-label">
+            <span>Confidence</span>
+            <small>{readiness === 'not_checked' ? 'This version has not been checked.' : 'No calibrated probability of correctness is available.'}</small>
+          </div>
+          <strong>Unavailable</strong>
+        </div>
+        {readiness === 'approved_with_override' && (
+          <div className="readiness-stat">
+            <div className="readiness-stat-label"><span>Remaining risks and justification</span></div>
+            <strong>{blockingCount} open finding{blockingCount === 1 ? '' : 's'}</strong>
+            {overrideDecisions.map(d => <small key={d.id}>{d.override_reason || 'No justification returned.'}</small>)}
+          </div>
+        )}
+      </div>
 
       {/* Live Async Processing Stepper */}
       {sub.status === 'ai_review' && (
         <div className="processing-card" role="status">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
             <strong style={{ color: '#28110f' }}>Reviewing {sub.content_type.toUpperCase()} against {sub.brand_name || user.brand_name}…</strong>
-            <span className="meta-chip">{progressPct}%</span>
           </div>
-          <div className="processing-progress-track">
-            <div className="processing-progress-fill" style={{ width: `${progressPct}%` }} />
-          </div>
+          {longProcessing && <p>Still reviewing. You can keep this page open or return to the library and reopen this submission.</p>}
+          {pollError && <p role="alert">Status could not be refreshed: {pollError} <button type="button" onClick={() => void loadData(null)}>Refresh submission</button></p>}
           <div className="stage-stepper">
             {[
               { key: 'extracting', label: '1. Extract content' },
@@ -1002,12 +1010,10 @@ export default function ReviewWorkspace({
           )}
 
           {lensFindings.length === 0 ? (
-            <div className="workspace-notice" style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' }}>
-              {lens === 'brand'
-                ? 'No brand guideline violations detected in this draft.'
-                : lens === 'claim'
-                ? 'No contradicted or unverified external claims detected in this draft.'
-                : 'No actionable violations detected.'}
+            <div className="workspace-notice" role="status">
+              {readiness === 'not_checked' || readiness === 'review_in_progress' || readiness === 'review_incomplete'
+                ? readinessExplanation(readiness)
+                : 'No open findings in this view. This does not establish that every claim is verified.'}
             </div>
           ) : (
             lensFindings.map((f, i) => renderFindingCard(f, i))
@@ -1015,7 +1021,7 @@ export default function ReviewWorkspace({
 
           {otherChecks.length > 0 && (
             <details style={{ marginTop: '14px' }}>
-              <summary>Passed / Aligned Checks ({otherChecks.length})</summary>
+              <summary>Other checks ({otherChecks.length})</summary>
               {otherChecks.map(f => renderFindingCard(f))}
             </details>
           )}
@@ -1132,9 +1138,9 @@ export default function ReviewWorkspace({
             )
           })()}
 
-          {sub.status === 'approved' && (
+          {(readiness === 'approved_for_publication' || readiness === 'approved_with_override') && (
             <span style={{ background: '#6be092', color: '#13351d', padding: '8px 16px', borderRadius: '8px', fontWeight: 700 }}>
-              ✓ Publication Approved
+              {readinessLabel(readiness, displayStatus, displayStage)}
             </span>
           )}
 

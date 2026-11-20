@@ -204,6 +204,7 @@ def test_external_evidence_rejects_unrelated_company_and_prioritizes_brand_facts
         [unrelated, related],
         claim_text="BrightLeaf organic tea is sourced from Assam.",
         brand_name="BrightLeaf",
+        org_domain="brightleaf.example.com",
     )
     assert filtered[0].status == "unavailable"
     assert filtered[0].entity_matched is False

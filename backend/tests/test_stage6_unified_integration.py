@@ -179,8 +179,8 @@ class TestStage6UnifiedIntegration:
             preserved_entities=entities,
             client=mock_client,
         )
-        assert passed is True
-        assert "passed" in note.lower()
+        assert passed is False
+        assert "no governing brand guideline" in note.lower()
 
         # Bad replacement: drops critical entities
         bad_replacement = "A platform with effective collaboration."

@@ -1,6 +1,7 @@
 """Repository pattern for submissions, version snapshots, flags, decisions, comments, audit events, and guideline rectifications."""
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 import threading
 from typing import Dict, List, Optional
 
@@ -67,6 +68,24 @@ class SubmissionRepository(ABC):
     async def update_rectification(self, item: GuidelineRectification) -> GuidelineRectification:
         return item
 
+    async def invalidate_rectifications(self, org_id: str, source_document_id: str, except_id: str) -> None:
+        pass
+
+    async def begin_check(self, submission: Submission, expected_version: int, expected_status: str) -> bool:
+        raise NotImplementedError
+
+    async def complete_check(self, submission: Submission, expected_version: int, job_id: str, flags: List[Flag], snapshot: VersionSnapshot) -> bool:
+        raise NotImplementedError
+
+    async def fail_check(self, submission_id: str, expected_version: int, job_id: str, error: str) -> bool:
+        raise NotImplementedError
+
+    def update_check_stage_if_current(self, submission_id: str, expected_version: int, job_id: str, stage: str) -> None:
+        pass
+
+    async def expire_stale_checks(self, max_idle_seconds: int) -> List[str]:
+        return []
+
 
 class InMemorySubmissionRepository(SubmissionRepository):
     """Thread-safe in-memory repository implementation with max submission capacity."""
@@ -126,6 +145,70 @@ class InMemorySubmissionRepository(SubmissionRepository):
             if submission.id in self._flags and submission.version not in self._flags[submission.id]:
                 self._flags[submission.id][submission.version] = []
             return submission
+
+    async def begin_check(self, submission: Submission, expected_version: int, expected_status: str) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission.id)
+            if not current or current.version != expected_version or current.status != expected_status:
+                return False
+            self._submissions[submission.id] = submission
+            return True
+
+    async def complete_check(self, submission: Submission, expected_version: int, job_id: str, flags: List[Flag], snapshot: VersionSnapshot) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission.id)
+            if not current or current.version != expected_version or current.processing_job_id != job_id or current.status != "ai_review":
+                return False
+            self._submissions[submission.id] = submission
+            self._flags.setdefault(submission.id, {})[expected_version] = list(flags)
+            self._snapshots.setdefault(submission.id, {})[expected_version] = snapshot
+            return True
+
+    async def fail_check(self, submission_id: str, expected_version: int, job_id: str, error: str) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission_id)
+            if not current or current.version != expected_version or current.processing_job_id != job_id or current.status != "ai_review":
+                return False
+            self._submissions[submission_id] = current.model_copy(update={
+                "status": "draft", "processing_stage": "failed", "processing_error": error,
+                "processing_job_id": None, "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return True
+
+    def update_check_stage_if_current(self, submission_id: str, expected_version: int, job_id: str, stage: str) -> None:
+        with self._lock:
+            current = self._submissions.get(submission_id)
+            if current and current.version == expected_version and current.processing_job_id == job_id and current.status == "ai_review":
+                current.processing_stage = stage
+                current.updated_at = datetime.now(timezone.utc).isoformat()
+
+    async def expire_stale_checks(self, max_idle_seconds: int) -> List[str]:
+        """Fail abandoned in-memory jobs while retaining the draft and its ID."""
+        now = datetime.now(timezone.utc)
+        expired: List[str] = []
+        with self._lock:
+            for sub_id, current in list(self._submissions.items()):
+                if current.status != "ai_review" or not current.processing_job_id:
+                    continue
+                try:
+                    updated = datetime.fromisoformat(current.updated_at.replace("Z", "+00:00"))
+                    idle = (now - updated).total_seconds()
+                except (TypeError, ValueError):
+                    idle = max_idle_seconds + 1
+                if idle < max_idle_seconds:
+                    continue
+                self._submissions[sub_id] = current.model_copy(update={
+                    "status": "draft", "processing_stage": "failed",
+                    "processing_error": "Review stopped responding. Retry the check on this saved submission.",
+                    "processing_job_id": None, "updated_at": now.isoformat(),
+                })
+                self._audit_events.setdefault(sub_id, []).append(AuditEvent(
+                    actor_role="system", action="check_abandoned",
+                    detail="Review exceeded the idle limit and can be retried without creating another submission.",
+                    timestamp=now.isoformat(), actor="system",
+                ))
+                expired.append(sub_id)
+        return expired
 
     async def set_flags(
         self, submission_id: str, flags: List[Flag], version: Optional[int] = None
@@ -265,6 +348,14 @@ class InMemorySubmissionRepository(SubmissionRepository):
                     return item
             arr.append(item)
             return item
+
+    async def invalidate_rectifications(self, org_id: str, source_document_id: str, except_id: str) -> None:
+        norm_org = (org_id or "inkloom").strip().lower()
+        with self._lock:
+            for rect in self._rectifications.get(norm_org, []):
+                if rect.document_id == source_document_id and rect.id != except_id and rect.status == "pending":
+                    rect.status = "stale"
+                    rect.invalidation_reason = "The source guideline was replaced by a newer active version. Refresh and scan again."
 
 
 class SupabaseRepository(SubmissionRepository):

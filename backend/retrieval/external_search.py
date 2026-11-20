@@ -14,7 +14,10 @@ import re
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlparse
 import httpx
+from time import perf_counter
 from google.genai import types
+
+timing_logger = logging.getLogger("uvicorn.error")
 
 from retrieval.config import (
     EXA_API_KEY,
@@ -91,7 +94,8 @@ def filter_relevant_external_evidence(
             continue
 
         title_str = item.title or ""
-        domain_str = item.domain or _extract_domain(item.url)
+        # The URL host, not source-supplied metadata, determines the domain.
+        domain_str = _extract_domain(item.url)
         excerpt_str = item.excerpt or ""
         combined = f"{title_str} {domain_str} {excerpt_str}".lower()
         combined_tokens = _tokenize_alnum(combined)
@@ -103,28 +107,18 @@ def filter_relevant_external_evidence(
 
         # Unrelated company check when claim is about the active brand
         if is_brand_specific and brand_tokens:
-            brand_present = brand_clean in combined or any(bt in combined_tokens for bt in brand_tokens)
-            same_org_domain = bool(org_domain and org_domain.lower() in domain_str.lower())
-            # Heuristic: if page title/domain prominently names another proper-noun brand and never mentions our brand, reject!
-            title_caps = {
-                w.lower()
-                for w in re.findall(r"\b[A-Z][a-zA-Z0-9]{2,}\b", title_str)
-                if w.lower() not in _GENERIC_TITLE_WORDS and w.lower() not in claim_tokens
-            }
-            domain_root = domain_str.split(".")[0] if domain_str else ""
-            is_authoritative_neutral = any(
-                d in domain_str for d in ("gov", "edu", "wikipedia.org", "reuters.com", "bbc.", "who.int", "iso.org", "nist.gov", "ftc.gov")
-            )
-            if not brand_present and not same_org_domain and not is_authoritative_neutral:
-                # If title/domain appears to be another company's site (e.g., BrightLeaf vs BrightLeaf Solar / another brand)
-                if title_caps or (domain_root and domain_root not in brand_tokens and domain_root not in claim_tokens):
-                    item.entity_matched = False
-                    item.status = "unavailable"
-                    item.rejected_reason = (
-                        f"unrelated_company_source: Source '{domain_str or title_str}' does not reference '{brand_name}'."
-                    )
-                    filtered.append(item)
-                    continue
+            approved_host = (org_domain or "").lower().strip().removeprefix("www.")
+            same_org_domain = bool(approved_host and (domain_str == approved_host or domain_str.endswith("." + approved_host)))
+            # Similar names and mentions on unrelated sites do not establish
+            # authority for an organisation's own prices, products, or offers.
+            if not same_org_domain:
+                item.entity_matched = False
+                item.status = "unavailable"
+                item.rejected_reason = (
+                    f"unrelated_company_source: Source '{domain_str or title_str}' is not an approved domain for '{brand_name}'."
+                )
+                filtered.append(item)
+                continue
 
         # Drop completely off-topic pages with almost zero keyword overlap
         if claim_tokens and rel_score < 0.12 and not (brand_clean and brand_clean in combined):
@@ -147,6 +141,7 @@ def _generate_with_model_fallback(
     models = [GEMINI_MODEL] + [m for m in FALLBACK_GEN_MODELS if m != GEMINI_MODEL]
     last_exc: Optional[Exception] = None
     for idx, model_name in enumerate(models):
+        started = perf_counter()
         try:
             return client.models.generate_content(
                 model=model_name,
@@ -154,7 +149,7 @@ def _generate_with_model_fallback(
                 config=types.GenerateContentConfig(
                     response_mime_type=response_mime_type,
                     temperature=temperature,
-                    http_options={"api_version": "v1beta"},
+                    http_options={"api_version": "v1beta", "timeout": 60000, "retry_options": {"attempts": 1}},
                 ),
             )
         except Exception as exc:
@@ -164,6 +159,8 @@ def _generate_with_model_fallback(
                 logger.warning("Model '%s' not found; falling back to next Gemini model.", model_name)
                 continue
             raise
+        finally:
+            timing_logger.info("External evidence model call elapsed_ms=%.0f", (perf_counter() - started) * 1000)
     if last_exc:
         raise last_exc
     raise RuntimeError("No Gemini model available")
@@ -173,6 +170,7 @@ def _search_tinysearch(query: str, max_results: int = 3) -> List[Dict[str, Any]]
     """Query TinySearch (`GET https://api.search.tinyfish.ai?query=...`)."""
     if not TINYFISH_API_KEY:
         return []
+    started = perf_counter()
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             resp = client.get(
@@ -184,14 +182,17 @@ def _search_tinysearch(query: str, max_results: int = 3) -> List[Dict[str, Any]]
             data = resp.json()
             return (data.get("results") or [])[:max_results]
     except Exception as exc:
-        logger.warning("TinySearch failed for query '%s': %s", query, exc)
+        logger.warning("TinySearch failed: %s", type(exc).__name__)
         return []
+    finally:
+        timing_logger.info("TinySearch elapsed_ms=%.0f", (perf_counter() - started) * 1000)
 
 
 def _search_exa(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
     """Query Exa Search (`POST https://api.exa.ai/search`) with inline text excerpts."""
     if not EXA_API_KEY:
         return []
+    started = perf_counter()
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             resp = client.post(
@@ -210,14 +211,17 @@ def _search_exa(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
             data = resp.json()
             return (data.get("results") or [])[:max_results]
     except Exception as exc:
-        logger.warning("Exa search failed for query '%s': %s", query, exc)
+        logger.warning("Exa search failed: %s", type(exc).__name__)
         return []
+    finally:
+        timing_logger.info("Exa search elapsed_ms=%.0f", (perf_counter() - started) * 1000)
 
 
 def _fetch_tinyfetch(urls: List[str]) -> Dict[str, Dict[str, Any]]:
     """Fetch clean markdown excerpts and metadata via TinyFetch (`POST https://api.fetch.tinyfish.ai`)."""
     if not TINYFISH_API_KEY or not urls:
         return {}
+    started = perf_counter()
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT) as client:
             resp = client.post(
@@ -247,6 +251,8 @@ def _fetch_tinyfetch(urls: List[str]) -> Dict[str, Dict[str, Any]]:
     except Exception as exc:
         logger.warning("TinyFetch batch error: %s", exc)
         return {}
+    finally:
+        timing_logger.info("TinyFetch elapsed_ms=%.0f urls=%d", (perf_counter() - started) * 1000, len(urls))
 
 
 def verify_claim_externally(

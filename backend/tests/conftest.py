@@ -20,6 +20,7 @@ def settings():
         repo_backend="memory",
         require_auth=False,
         enforce_approval_gates=False,
+        mock_ai=True,
     )
 
 

@@ -2,7 +2,7 @@
 
 FastAPI microservice for autonomous, pre-publication brand compliance reviews, multimodal asset verification (text, image, PDF), version-aware governance, and human-in-the-loop approvals.
 
-> **Roadmap & Architecture Notice**: OCR image text extraction, persistent Supabase integration, real Gemini/Exa/TinyFish external API calls, and authentication are intentionally not implemented yet. In-memory storage is active, meaning data is reset on application restart (set `DEMO_MODE=true` and call `POST /demo/seed` to repopulate test records). `SupabaseRepository` remains a placeholder raising `NotImplementedError` until schema finalization.
+> **Current state:** Authentication, OCR/extraction paths, Gemini and external-search adapters, and organisation-scoped brand document retrieval are implemented. Their real-service accuracy and latency still require deployment testing. Submission, comment, decision and audit storage defaults to memory and is lost on restart; `SupabaseRepository` for submissions remains a placeholder. Explicit `MOCK_AI=true` enables fixture behaviour. Retrieval failures and unreadable files produce incomplete checks, not a passing result. The JSON certificate is not cryptographically signed. See [testing notes](TESTING_NOTES.md).
 
 ---
 
@@ -69,7 +69,7 @@ Configure application settings via environment variables (read via `os.environ`)
 
 ## 5. Endpoints Overview (Synchronized with OpenAPI)
 
-Total Endpoints in OpenAPI: **17**
+The endpoint overview below is historical. Use the running server's `/openapi.json` for the current contract, including authentication, asynchronous status and retry, brand documents, and rectification.
 
 | Method | Path | Allowed Role(s) | Description |
 |---|---|---|---|
@@ -194,4 +194,4 @@ cd backend
 pytest tests/ -v
 ```
 
-All 66 tests run in-memory with zero network or external database dependencies.
+The isolated automated suite uses synthetic fixtures and local in-memory repositories. Its current result and unverified live-service and migration checks are recorded in [testing notes](TESTING_NOTES.md).

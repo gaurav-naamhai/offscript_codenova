@@ -320,13 +320,21 @@ def compute_recurring_hints(
     guideline_counts: Counter[str] = Counter()
     passage_counts: Counter[str] = Counter()
 
+    seen_history: set[tuple[str, str, str]] = set()
     for hf in historical_flags:
+        if hf.status != "open" or hf.origin == "error":
+            continue
         if hf.state not in ("potential_issue", "contradicted", "insufficient_evidence", "unclear"):
             continue
-        topic_counts[_cluster_issue_topic(hf.explanation or "")] += 1
+        topic = _cluster_issue_topic(hf.explanation or "")
+        key = (hf.submission_id, (hf.passage or "").strip(), topic)
+        if key in seen_history:
+            continue
+        seen_history.add(key)
+        topic_counts[topic] += 1
         if hf.guideline_ref and hf.guideline_ref.document:
             guideline_counts[hf.guideline_ref.document.lower()] += 1
-        p_norm = (hf.passage or "").strip().lower()
+        p_norm = (hf.passage or "").strip()
         if p_norm and p_norm != "(whole submission)" and len(p_norm) >= 3:
             passage_counts[p_norm] += 1
 
@@ -337,7 +345,7 @@ def compute_recurring_hints(
             continue
         topic = _cluster_issue_topic(cf.explanation or "")
         g_doc = cf.guideline_ref.document if cf.guideline_ref else None
-        p_norm = (cf.passage or "").strip().lower()
+        p_norm = (cf.passage or "").strip()
 
         repeat_count = max(
             topic_counts.get(topic, 0),
@@ -362,7 +370,7 @@ def compute_recurring_hints(
                 severity="high" if repeat_count >= 3 else "medium",
                 message=(
                     f"Heads up — there's a recurring brand issue {line_prefix}{snippet}"
-                    f"seen {repeat_count} times across recent reviews ({topic}){rule_ref}. "
+                    f"seen in {repeat_count} separate submissions ({topic}){rule_ref}. "
                     "Consider modifying this phrasing before submitting for approval."
                 ),
             )
@@ -382,16 +390,18 @@ def compute_draft_hints(
 
     hints: List[RecurringHint] = []
     seen: set[str] = set()
-    low = clean.lower()
-
     # 1. Check active Brand Constitution forbidden terms
     forbidden = (constitution or {}).get("forbidden_terms") or []
     for term in forbidden:
         t_clean = str(term).strip()
         if len(t_clean) < 3:
             continue
-        if re.search(r"\b" + re.escape(t_clean.lower()) + r"\b", low):
-            line_no = _find_line_number(clean, t_clean)
+        preferred = (constitution or {}).get("preferred_terms") or []
+        case_matters = any(str(term).casefold() == t_clean.casefold() and str(term) != t_clean for term in preferred)
+        pattern = r"(?<!\w)" + re.escape(t_clean) + r"(?!\w)"
+        match = re.search(pattern, clean, 0 if case_matters else re.IGNORECASE)
+        if match:
+            line_no = clean[:match.start()].count("\n") + 1
             key = f"term:{t_clean.lower()}"
             if key not in seen:
                 seen.add(key)
@@ -413,29 +423,34 @@ def compute_draft_hints(
     # 2. Check historically repeated passages in the org's prior flags
     passage_counts: Counter[str] = Counter()
     passage_example_rule: Dict[str, str] = {}
+    seen_past: set[tuple[str, str]] = set()
     for hf in historical_flags or []:
-        if hf.state in ("potential_issue", "contradicted"):
+        if hf.status == "open" and hf.origin != "error" and hf.state in ("potential_issue", "contradicted"):
             p = (hf.passage or "").strip()
             if 3 <= len(p) <= 80 and p.lower() != "(whole submission)":
-                passage_counts[p.lower()] += 1
+                key = (hf.submission_id, p)
+                if key in seen_past:
+                    continue
+                seen_past.add(key)
+                passage_counts[p] += 1
                 if hf.guideline_ref:
-                    passage_example_rule[p.lower()] = hf.guideline_ref.document
+                    passage_example_rule[p] = hf.guideline_ref.document
 
-    for p_low, cnt in passage_counts.most_common(12):
-        if cnt >= 2 and p_low in low and f"term:{p_low}" not in seen:
-            seen.add(f"term:{p_low}")
-            line_no = _find_line_number(clean, p_low)
+    for passage, cnt in passage_counts.most_common(12):
+        if cnt >= 2 and re.search(r"(?<!\w)" + re.escape(passage) + r"(?!\w)", clean) and f"term:{passage.casefold()}" not in seen:
+            seen.add(f"term:{passage.casefold()}")
+            line_no = _find_line_number(clean, passage)
             hints.append(
                 RecurringHint(
                     topic="Repeated Past Mistake",
                     count=cnt,
                     line_number=line_no,
-                    passage=p_low,
-                    guideline_reference=passage_example_rule.get(p_low),
+                    passage=passage,
+                    guideline_reference=passage_example_rule.get(passage),
                     severity="medium",
                     message=(
-                        f"Heads up — line {line_no or 1} uses '{p_low}', which was flagged {cnt} times "
-                        "in previous reviews. You may want to rephrase it now."
+                        f"Heads up — line {line_no or 1} uses '{passage}', seen in {cnt} separate submissions "
+                        "with open findings. You may want to review it now."
                     ),
                 )
             )

@@ -80,6 +80,7 @@ DEFAULT_GUIDELINES: List[GuidelineRef] = [
 _LOCAL_LOCK = threading.Lock()
 _LOCAL_DOCS: Dict[str, Dict[str, Any]] = {}
 _LOCAL_CHUNKS: Dict[str, List[Dict[str, Any]]] = {}
+_LOCAL_EVENTS: List[Dict[str, Any]] = []
 
 
 def _supabase_configured() -> bool:
@@ -105,6 +106,7 @@ def clear_local_brand_store() -> None:
     with _LOCAL_LOCK:
         _LOCAL_DOCS.clear()
         _LOCAL_CHUNKS.clear()
+        _LOCAL_EVENTS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +119,14 @@ def _encode_storage_meta(
     brand_name: Optional[str] = None,
     previous_version_id: Optional[str] = None,
     raw_path: Optional[str] = None,
+    family_id: Optional[str] = None,
 ) -> str:
     clean_org = (org_id or "inkloom").strip().lower()
     clean_brand = (brand_name or clean_org).strip().replace("|", " ")
     prev = (previous_version_id or "").strip().replace("|", "")
+    family = (family_id or "").strip().replace("|", "")
     tail = (raw_path or "").strip()
-    return f"org:{clean_org}|brand:{clean_brand}|prev:{prev}|{tail}"
+    return f"org:{clean_org}|brand:{clean_brand}|prev:{prev}|family:{family}|{tail}"
 
 
 def _infer_org_from_doc_row(row: Dict[str, Any]) -> Tuple[str, str, Optional[str]]:
@@ -164,7 +168,39 @@ def _enrich_doc_row(row: Dict[str, Any]) -> Dict[str, Any]:
     enriched["org_id"] = org_id
     enriched["brand_name"] = brand_name
     enriched["previous_version_id"] = prev_id
+    family_in_path = next((part[7:] for part in str(row.get("storage_path") or "").split("|") if part.startswith("family:")), "")
+    enriched["family_id"] = str(row.get("family_id") or family_in_path or "") or None
+    enriched["revision"] = row.get("revision_number") or row.get("revision")
     return enriched
+
+
+def _resolve_family_ids(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Recover stable family roots for legacy rows without merging unrelated same-title uploads."""
+    by_id = {str(row["id"]): row for row in rows}
+    for row in rows:
+        if row.get("family_id"):
+            continue
+        current, seen = row, set()
+        while current.get("previous_version_id") and str(current["id"]) not in seen:
+            seen.add(str(current["id"]))
+            parent = by_id.get(str(current["previous_version_id"]))
+            if not parent:
+                break
+            current = parent
+        row["family_id"] = current.get("family_id") or str(current["id"])
+    return rows
+
+
+def _require_unambiguous_active_docs(rows: List[Dict[str, Any]]) -> None:
+    families: Set[Tuple[str, str]] = set()
+    titles: Set[Tuple[str, str]] = set()
+    for row in rows:
+        family = (str(row.get("org_id")), str(row.get("family_id")))
+        title = (str(row.get("org_id")), str(row.get("title") or "").strip().casefold())
+        if family in families or title in titles:
+            raise ValueError("Multiple active versions or ambiguous same-title guidelines exist. Review document history before retrieval or publication.")
+        families.add(family)
+        titles.add(title)
 
 
 def _bump_version_string(version: str) -> str:
@@ -237,20 +273,25 @@ def list_brand_docs(
     if not _supabase_configured():
         with _LOCAL_LOCK:
             docs = [dict(d) for d in _LOCAL_DOCS.values()]
+        docs = _resolve_family_ids([_enrich_doc_row(d) for d in docs])
         if not include_inactive:
             docs = [d for d in docs if d.get("is_active", True)]
         if target_org:
             docs = [d for d in docs if d.get("org_id", "inkloom") == target_org]
+        if not include_inactive:
+            _require_unambiguous_active_docs(docs)
         return sorted(docs, key=lambda d: d.get("created_at", ""), reverse=True)
 
     sb = get_supabase_client()
     query = sb.table("brand_documents").select("*").order("created_at", desc=True)
-    if not include_inactive:
-        query = query.eq("is_active", True)
     res = query.execute()
-    rows = [_enrich_doc_row(r) for r in (res.data or [])]
+    rows = _resolve_family_ids([_enrich_doc_row(r) for r in (res.data or [])])
+    if not include_inactive:
+        rows = [r for r in rows if r.get("is_active", True)]
     if target_org:
         rows = [r for r in rows if r["org_id"] == target_org]
+    if not include_inactive:
+        _require_unambiguous_active_docs(rows)
     return rows
 
 
@@ -264,13 +305,15 @@ def get_brand_doc_by_id(document_id: str, org_id: Optional[str] = None) -> Optio
                 return None
             if target_org and row.get("org_id", "inkloom") != target_org:
                 return None
-            return dict(row)
+        return next((d for d in list_brand_docs(include_inactive=True, org_id=target_org) if d["id"] == document_id), None)
 
     sb = get_supabase_client()
     res = sb.table("brand_documents").select("*").eq("id", document_id).limit(1).execute()
     if not res.data:
         return None
-    enriched = _enrich_doc_row(res.data[0])
+    enriched = next((d for d in list_brand_docs(include_inactive=True, org_id=target_org) if d["id"] == document_id), None)
+    if not enriched:
+        return None
     if target_org and enriched["org_id"] != target_org:
         return None
     return enriched
@@ -283,14 +326,34 @@ def list_brand_doc_versions(
     """List all versions (active + archived previous versions) for a brand document title/ID."""
     all_docs = list_brand_docs(include_inactive=True, org_id=org_id)
     target_title = document_id_or_title.strip().lower()
+    target_family = None
     for d in all_docs:
         if d.get("id") == document_id_or_title:
             target_title = (d.get("title") or "").strip().lower()
+            target_family = d.get("family_id")
             break
     matched = [
+        d for d in all_docs if d.get("family_id") == target_family
+    ] if target_family else [
         d for d in all_docs if (d.get("title") or "").strip().lower() == target_title
     ]
     return sorted(matched, key=lambda d: (d.get("is_active", False), d.get("created_at", "")), reverse=True)
+
+
+def list_brand_doc_events(document_id: str, org_id: str) -> List[dict]:
+    doc = get_brand_doc_by_id(document_id, org_id=org_id)
+    if not doc:
+        return []
+    family_id = str(doc["family_id"])
+    if not _supabase_configured():
+        with _LOCAL_LOCK:
+            return [dict(event) for event in _LOCAL_EVENTS if event["family_id"] == family_id]
+    try:
+        response = get_supabase_client().table("brand_document_events").select("*").eq("family_id", family_id).order("created_at").execute()
+        return response.data or []
+    except Exception as exc:
+        logger.warning("Brand document publication events unavailable until migration is applied: %s", exc)
+        return []
 
 
 def deactivate_brand_doc(
@@ -405,56 +468,24 @@ def ingest_brand_doc(
     org_id: str = "inkloom",
     brand_name: Optional[str] = None,
     previous_version_id: Optional[str] = None,
+    published_by: Optional[str] = None,
 ) -> BrandDocumentRecord:
     """Extract, chunk, compile Brand Constitution, embed, and store a brand document scoped to `org_id`."""
     clean_org = (org_id or "inkloom").strip().lower()
     clean_brand = (brand_name or clean_org).strip()
 
-    # 1. Mark earlier active versions of the same document title within the SAME org as inactive
-    if deactivate_previous_versions:
-        try:
-            existing = list_brand_docs(include_inactive=False, org_id=clean_org)
-            for doc in existing:
-                if (doc.get("title") or "").strip().lower() == title.strip().lower():
-                    if not previous_version_id:
-                        previous_version_id = doc.get("id")
-                    deactivate_brand_doc(document_id=doc["id"], org_id=clean_org)
-        except Exception as exc:
-            logger.warning("Could not deactivate previous versions for '%s': %s", title, exc)
-
-    # 2. Extract pages, split into rule-aware chunks, and compile Brand Constitution
+    # Prepare content before any active-version change.
     extracted = extract_document(file_bytes=file_bytes, filename=filename)
     chunks = chunk_pages(extracted.pages)
     if not chunks:
         raise ValueError(f"No readable text chunks extracted from '{filename}'.")
 
     constitution = compile_brand_constitution(extracted.pages, title=title)
-    encoded_path = _encode_storage_meta(
-        org_id=clean_org,
-        brand_name=clean_brand,
-        previous_version_id=previous_version_id,
-        raw_path=storage_path,
-    )
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # Offline local store fallback (when Supabase credentials are not set)
     if not _supabase_configured():
         doc_id = str(uuid.uuid4())
-        doc_row = {
-            "id": doc_id,
-            "title": title,
-            "category": category,
-            "version": version,
-            "is_active": True,
-            "source_filename": filename,
-            "storage_path": encoded_path,
-            "org_id": clean_org,
-            "brand_name": clean_brand,
-            "previous_version_id": previous_version_id,
-            "constitution": constitution,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
         chunk_rows = [
             {
                 "id": str(uuid.uuid4()),
@@ -471,84 +502,65 @@ def ingest_brand_doc(
             for c in chunks
         ]
         with _LOCAL_LOCK:
+            active = [d for d in _LOCAL_DOCS.values() if d.get("org_id") == clean_org and d.get("is_active") and str(d.get("title", "")).strip().lower() == title.strip().lower()]
+            if len(active) > 1:
+                raise ValueError("Multiple active documents have this title. Review the existing versions before uploading a replacement.")
+            if active and not deactivate_previous_versions:
+                raise ValueError("An active document already has this title. Review its version history before creating another family.")
+            current = active[0] if active and deactivate_previous_versions else None
+            if previous_version_id and (not current or current["id"] != previous_version_id):
+                raise ValueError("The expected current guideline version changed. Refresh before uploading.")
+            family_id = (current.get("family_id") or current["id"]) if current else str(uuid.uuid4())
+            revision = max((int(d.get("revision") or 1) for d in _LOCAL_DOCS.values() if d.get("family_id") == family_id), default=0) + 1
+            actual_version = _bump_version_string(str(current.get("version") or "1.0")) if current else version
+            encoded_path = _encode_storage_meta(clean_org, clean_brand, current["id"] if current else None, storage_path, family_id)
+            doc_row = {
+                "id": doc_id, "title": title, "category": category, "version": actual_version,
+                "revision": revision, "family_id": family_id, "is_active": True,
+                "source_filename": filename, "storage_path": encoded_path, "org_id": clean_org,
+                "brand_name": clean_brand, "previous_version_id": current["id"] if current else None,
+                "constitution": constitution, "created_at": now_iso, "updated_at": now_iso,
+            }
+            if current:
+                current["is_active"] = False
             _LOCAL_DOCS[doc_id] = doc_row
             _LOCAL_CHUNKS[doc_id] = chunk_rows
+            _LOCAL_EVENTS.append({"family_id": family_id, "document_id": doc_id,
+                                  "previous_version_id": current["id"] if current else None,
+                                  "event_type": "upload", "actor": published_by,
+                                  "created_at": now_iso})
         return BrandDocumentRecord(
             id=doc_id,
             title=title,
             category=category,
-            version=version,
+            version=actual_version,
             is_active=True,
             source_filename=filename,
             storage_path=encoded_path,
             chunks_count=len(chunk_rows),
             org_id=clean_org,
             brand_name=clean_brand,
-            previous_version_id=previous_version_id,
+            previous_version_id=current["id"] if current else None,
+            family_id=family_id,
+            revision=revision,
             constitution=constitution,
             created_at=now_iso,
         )
 
-    # Live Supabase persistence
     sb = get_supabase_client()
     document_family = f"{title.strip().lower()}::{(category or 'guideline').strip().lower()}"
-    existing_family_rows = (
-        sb.table("brand_documents")
-        .select("id,revision_number,is_active")
-        .eq("org_id", clean_org)
-        .eq("document_family", document_family)
-        .order("revision_number", desc=True)
-        .execute()
-        .data
-        or []
-    )
-    active_existing = next((r for r in existing_family_rows if r.get("is_active")), None)
-
-    if active_existing:
-        rpc_res = sb.rpc(
-            "publish_brand_document_version",
-            {
-                "p_source_doc_id": active_existing["id"],
-                "p_expected_revision": active_existing.get("revision_number"),
-                "p_title": title,
-                "p_category": category,
-                "p_new_version": version,
-                "p_source_filename": filename,
-                "p_storage_path": encoded_path,
-                "p_org_id": clean_org,
-                "p_approved_by": "upload",
-                "p_reason": "Uploaded new guideline version",
-            },
-        ).execute()
-        if not rpc_res.data:
-            raise RuntimeError("publish_brand_document_version returned no data during upload.")
-        doc_row = rpc_res.data[0]
-        doc_id = doc_row["new_document_id"]
-    else:
-        max_rev = max((int(r.get("revision_number") or 0) for r in existing_family_rows), default=0)
-        insert_payload = {
-            "title": title,
-            "category": category,
-            "version": version,
-            "is_active": True,
-            "source_filename": filename,
-            "storage_path": encoded_path,
-            "org_id": clean_org,
-            "document_family": document_family,
-            "revision_number": max_rev + 1,
-        }
-        if previous_version_id:
-            insert_payload["previous_version_id"] = previous_version_id
-        doc_insert = sb.table("brand_documents").insert(insert_payload).execute()
-        if not doc_insert.data:
-            raise RuntimeError("Failed to insert row into brand_documents.")
-        doc_row = doc_insert.data[0]
-        doc_id = doc_row["id"]
+    active = [d for d in list_brand_docs(org_id=clean_org) if d.get("document_family") == document_family]
+    if len(active) > 1 or (active and not deactivate_previous_versions):
+        raise ValueError("Ambiguous or existing active guideline family; review history.")
+    current = active[0] if active else None
+    if previous_version_id and (not current or current["id"] != previous_version_id):
+        raise ValueError("Stale guideline version; refresh before upload.")
+    family_id = str(current.get("family_id") or current["id"]) if current else str(uuid.uuid4())
+    encoded_path = _encode_storage_meta(clean_org, clean_brand, current["id"] if current else None, storage_path, family_id)
 
     vectors = embed_texts([c.content for c in chunks])
     chunk_rows = [
         {
-            "document_id": doc_id,
             "content": chunk.content,
             "page_number": chunk.page_number,
             "section": chunk.section,
@@ -557,20 +569,35 @@ def ingest_brand_doc(
         }
         for chunk, vector in zip(chunks, vectors)
     ]
-    sb.table("brand_chunks").insert(chunk_rows).execute()
-
+    try:
+        published = get_supabase_client().rpc("publish_brand_document_version_v2", {
+            "p_source_doc_id": current["id"] if current else None,
+            "p_expected_revision": current.get("revision_number") if current else None,
+            "p_title": title, "p_category": category,
+            "p_new_version": _bump_version_string(str(current["version"])) if current else version,
+            "p_source_filename": filename, "p_storage_path": encoded_path,
+            "p_org_id": clean_org, "p_approved_by": published_by or "upload",
+            "p_reason": "Uploaded guideline version", "p_chunks": chunk_rows,
+        }).execute().data
+    except Exception as exc:
+        raise ValueError("Atomic guideline publication failed or source is stale; previous version remains active.") from exc
+    doc_row = published[0] if isinstance(published, list) else published
+    if not isinstance(doc_row, dict) or not doc_row.get("new_document_id"):
+        raise RuntimeError("Atomic guideline publication returned unexpected data.")
     return BrandDocumentRecord(
-        id=doc_id,
+        id=doc_row["new_document_id"],
         title=title,
         category=category,
-        version=version,
+        version=_bump_version_string(str(current["version"])) if current else version,
         is_active=True,
         source_filename=filename,
         storage_path=encoded_path,
         chunks_count=len(chunk_rows),
         org_id=clean_org,
         brand_name=clean_brand,
-        previous_version_id=previous_version_id,
+        previous_version_id=current["id"] if current else None,
+        family_id=family_id,
+        revision=doc_row.get("new_revision_number"),
         constitution=constitution,
         created_at=doc_row.get("created_at") or now_iso,
     )
@@ -582,11 +609,19 @@ def create_rectified_brand_doc_version(
     new_chunk_text: str,
     org_id: str,
     approved_by: str = "manager",
+    expected_current_version: Optional[str] = None,
+    target_rule_text: Optional[str] = None,
 ) -> BrandDocumentRecord:
     """Publish a rectified version of a brand guideline document, archiving the previous version."""
     source_doc = get_brand_doc_by_id(source_doc_id, org_id=org_id)
     if not source_doc:
         raise ValueError(f"Brand document '{source_doc_id}' not found for organisation '{org_id}'.")
+    if not source_doc.get("is_active") or (expected_current_version and str(source_doc.get("version")) != expected_current_version):
+        raise ValueError("This rectification is based on an older guideline version. Refresh and scan the current version.")
+    family_id = str(source_doc.get("family_id") or source_doc_id)
+    active_family = [d for d in list_brand_docs(org_id=org_id) if str(d.get("family_id")) == family_id]
+    if len(active_family) != 1 or active_family[0]["id"] != source_doc_id:
+        raise ValueError("The guideline family has changed or has multiple active versions. Refresh and review before publishing.")
 
     existing_chunks = get_brand_doc_chunks(source_doc_id)
     if not existing_chunks:
@@ -604,7 +639,12 @@ def create_rectified_brand_doc_version(
     for idx, c in enumerate(existing_chunks):
         c_content = c.get("content", "")
         if str(c.get("id")) == str(target_chunk_id):
-            c_content = clean_text
+            if target_rule_text:
+                if target_rule_text not in c_content:
+                    raise ValueError("The scanned rule no longer matches the current chunk. Refresh and scan again.")
+                c_content = c_content.replace(target_rule_text, clean_text, 1)
+            else:
+                c_content = clean_text
             replaced = True
         page_num = int(c.get("page_number") or 1)
         sec = c.get("section")
@@ -633,28 +673,13 @@ def create_rectified_brand_doc_version(
         brand_name=brand_name,
         previous_version_id=source_doc_id,
         raw_path=f"rectified_by:{approved_by}",
+        family_id=family_id,
     )
     now_iso = datetime.now(timezone.utc).isoformat()
 
     if not _supabase_configured():
-        # Deactivate old version in local store while keeping all its rows & chunks intact for history
-        deactivate_brand_doc(document_id=source_doc_id, org_id=org_id)
+        # Validate and replace under the local lock below, preserving the source on failure.
         new_doc_id = str(uuid.uuid4())
-        new_doc_row = {
-            "id": new_doc_id,
-            "title": title,
-            "category": category,
-            "version": new_version,
-            "is_active": True,
-            "source_filename": filename,
-            "storage_path": encoded_path,
-            "org_id": org_id,
-            "brand_name": brand_name,
-            "previous_version_id": source_doc_id,
-            "constitution": constitution,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
         new_chunk_rows = [
             {
                 "id": str(uuid.uuid4()),
@@ -669,8 +694,29 @@ def create_rectified_brand_doc_version(
             for ch in updated_chunks
         ]
         with _LOCAL_LOCK:
+            current = _LOCAL_DOCS.get(source_doc_id)
+            active = [d for d in _LOCAL_DOCS.values() if d.get("org_id") == org_id and d.get("family_id") == family_id and d.get("is_active")]
+            if not current or not current.get("is_active") or len(active) != 1 or active[0]["id"] != source_doc_id:
+                raise ValueError("This rectification is stale or the family has multiple active versions. Refresh and scan again.")
+            if expected_current_version and str(current.get("version")) != expected_current_version:
+                raise ValueError("The expected current guideline version changed. Refresh and scan again.")
+            revision = max((int(d.get("revision") or 1) for d in _LOCAL_DOCS.values() if d.get("family_id") == family_id), default=0) + 1
+            new_version = _bump_version_string(str(current.get("version") or "1.0"))
+            new_doc_row = {
+                "id": new_doc_id, "title": title, "category": category,
+                "version": new_version, "revision": revision, "family_id": family_id,
+                "is_active": True, "source_filename": filename, "storage_path": encoded_path,
+                "org_id": org_id, "brand_name": brand_name,
+                "previous_version_id": source_doc_id, "constitution": constitution,
+                "created_at": now_iso, "updated_at": now_iso,
+            }
+            current["is_active"] = False
             _LOCAL_DOCS[new_doc_id] = new_doc_row
             _LOCAL_CHUNKS[new_doc_id] = new_chunk_rows
+            _LOCAL_EVENTS.append({"family_id": family_id, "document_id": new_doc_id,
+                                  "previous_version_id": source_doc_id,
+                                  "event_type": "rectification", "actor": approved_by,
+                                  "created_at": now_iso})
         return BrandDocumentRecord(
             id=new_doc_id,
             title=title,
@@ -683,37 +729,15 @@ def create_rectified_brand_doc_version(
             org_id=org_id,
             brand_name=brand_name,
             previous_version_id=source_doc_id,
+            family_id=family_id,
+            revision=revision,
             constitution=constitution,
             created_at=now_iso,
         )
 
-    sb = get_supabase_client()
-    expected_revision = source_doc.get("revision_number")
-    rpc_res = sb.rpc(
-        "publish_brand_document_version",
-        {
-            "p_source_doc_id": source_doc_id,
-            "p_expected_revision": int(expected_revision) if expected_revision is not None else None,
-            "p_title": title,
-            "p_category": category,
-            "p_new_version": new_version,
-            "p_source_filename": filename,
-            "p_storage_path": encoded_path,
-            "p_org_id": org_id,
-            "p_approved_by": approved_by,
-            "p_reason": f"Rectified chunk {target_chunk_id}",
-        },
-    ).execute()
-    if not rpc_res.data:
-        raise RuntimeError("publish_brand_document_version returned no data.")
-    row0 = rpc_res.data[0]
-    new_doc_id = row0["new_document_id"]
-    published_at = row0.get("created_at") or now_iso
-
     vectors = embed_texts([c.content for c in updated_chunks])
     chunk_rows = [
         {
-            "document_id": new_doc_id,
             "content": c.content,
             "page_number": c.page_number,
             "section": c.section,
@@ -722,10 +746,23 @@ def create_rectified_brand_doc_version(
         }
         for c, vec in zip(updated_chunks, vectors)
     ]
-    sb.table("brand_chunks").insert(chunk_rows).execute()
+    try:
+        published = get_supabase_client().rpc("publish_brand_document_version_v2", {
+            "p_source_doc_id": source_doc_id,
+            "p_expected_revision": source_doc.get("revision_number"),
+            "p_title": title, "p_category": category, "p_new_version": new_version,
+            "p_source_filename": filename, "p_storage_path": encoded_path,
+            "p_org_id": org_id, "p_approved_by": approved_by,
+            "p_reason": f"Rectified chunk {target_chunk_id}", "p_chunks": chunk_rows,
+        }).execute().data
+    except Exception as exc:
+        raise ValueError("The guideline version changed or atomic publication is unavailable. Refresh the versions and review this proposal again.") from exc
+    doc_row = published[0] if isinstance(published, list) else published
+    if not isinstance(doc_row, dict) or not doc_row.get("new_document_id"):
+        raise RuntimeError("Atomic guideline publication returned an unexpected response.")
 
     return BrandDocumentRecord(
-        id=new_doc_id,
+        id=doc_row["new_document_id"],
         title=title,
         category=category,
         version=new_version,
@@ -736,8 +773,10 @@ def create_rectified_brand_doc_version(
         org_id=org_id,
         brand_name=brand_name,
         previous_version_id=source_doc_id,
+        family_id=family_id,
+        revision=doc_row.get("new_revision_number"),
         constitution=constitution,
-        created_at=published_at,
+        created_at=doc_row.get("created_at") or now_iso,
     )
 
 

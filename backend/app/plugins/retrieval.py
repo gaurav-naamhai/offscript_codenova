@@ -1,11 +1,8 @@
-"""Guideline retrieval plugin.
-
-OWNER: Ken
-Wires Gaurav's FastAPI pipeline to Ken's Supabase pgvector RAG (`retrieval/brand_rag.py`),
-with automatic fallback to offline fixture rules when credentials are unavailable (e.g. unit tests).
-"""
+"""Guideline retrieval plugin with explicit fixture mode and organisation scope."""
 
 from typing import List
+
+from app.config import Settings
 
 from app.models import ContentPayload, GuidelineRef
 
@@ -57,10 +54,14 @@ def retrieve_guidelines(content: ContentPayload) -> List[GuidelineRef]:
     """Retrieve relevant brand and claim guidelines for the submitted content."""
     try:
         from retrieval.config import GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL
-        if not (GEMINI_API_KEY and SUPABASE_URL and SUPABASE_KEY):
-            return [r["guideline"] for r in RULES]
-
-        from retrieval.brand_rag import retrieve_guidelines as rag_retrieve
+        from retrieval.brand_rag import list_brand_docs, retrieve_guidelines as rag_retrieve
+        org_id = getattr(content, "org_id", None)
+        has_active_docs = bool(org_id and list_brand_docs(org_id=org_id))
+        if not has_active_docs:
+            if getattr(content, "mock_mode", False) or Settings().mock_ai:
+                return [r["guideline"] for r in RULES]
+            if not (GEMINI_API_KEY and SUPABASE_URL and SUPABASE_KEY):
+                raise RuntimeError("Active organisation guideline retrieval is not configured.")
         from retrieval.schemas import ContentPayload as RetrievalPayload
 
         payload = RetrievalPayload(
@@ -69,15 +70,20 @@ def retrieve_guidelines(content: ContentPayload) -> List[GuidelineRef]:
             file_name=content.file_name,
             file_mime=content.file_mime,
             file_bytes=content.file_bytes,
-            org_id=getattr(content, "org_id", None),
+            org_id=org_id,
             brand_name=getattr(content, "brand_name", None),
             extracted_text=getattr(content, "extracted_text", None),
         )
         results = rag_retrieve(
             payload,
-            org_id=getattr(content, "org_id", None),
+            org_id=org_id,
             brand_name=getattr(content, "brand_name", None),
         )
+        expected_org = (getattr(content, "org_id", None) or "").strip().lower()
+        if not expected_org:
+            raise RuntimeError("Organisation is required for active guideline retrieval.")
+        if any((g.org_id or "").strip().lower() != expected_org for g in results):
+            raise RuntimeError("Guideline retrieval returned a different organisation's document.")
         return [GuidelineRef(**g.model_dump()) for g in results]
     except Exception:
-        return [r["guideline"] for r in RULES]
+        raise

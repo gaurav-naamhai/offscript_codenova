@@ -20,15 +20,20 @@ ALTER TABLE brand_documents
 UPDATE brand_documents
 SET org_id = COALESCE(
         NULLIF(substring(storage_path FROM '__org=([^|]+)'), ''),
+        NULLIF(substring(storage_path FROM '(?:^|\|)org:([^|]+)'), ''),
         NULLIF(org_id, ''),
         'default'
     )
 WHERE org_id = 'default' OR org_id IS NULL;
 
 UPDATE brand_documents
-SET previous_version_id = substring(storage_path FROM '__prev=([0-9a-fA-F-]{36})')::uuid
+SET previous_version_id = COALESCE(
+    substring(storage_path FROM '__prev=([0-9a-fA-F-]{36})'),
+    substring(storage_path FROM '(?:^|\|)prev:([0-9a-fA-F-]{36})(?:\||$)')
+)::uuid
 WHERE previous_version_id IS NULL
-  AND storage_path ~ '__prev=[0-9a-fA-F-]{36}';
+  AND (storage_path ~ '__prev=[0-9a-fA-F-]{36}'
+       OR storage_path ~ '(?:^|\|)prev:[0-9a-fA-F-]{36}(?:\||$)');
 
 UPDATE brand_documents
 SET document_family = lower(trim(title)) || '::' || lower(trim(COALESCE(category, 'guideline')))

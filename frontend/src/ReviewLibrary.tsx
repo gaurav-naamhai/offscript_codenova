@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { serverApi } from './serverApi'
 import type { SubmissionSummary } from './serverApi'
+import { readinessLabel } from './reviewReadiness'
 import './ReviewLibrary.css'
 
 export default function ReviewLibrary({
@@ -121,8 +122,8 @@ export default function ReviewLibrary({
                   <h2>{r.title || 'Untitled submission'}</h2>
                   <p>
                     {r.content_type.toUpperCase()} · Status:{' '}
-                    <strong style={{ color: r.status === 'approved' ? '#2e7d32' : '#6a1b9a' }}>
-                      {r.status.replace('_', ' ').toUpperCase()}
+                    <strong style={{ color: r.readiness_status?.startsWith('approved') ? '#2e7d32' : '#6a1b9a' }}>
+                      {readinessLabel(r.readiness_status, r.status, r.processing_stage)}
                     </strong>{' '}
                     · v{r.version} · {r.flag_count} findings ({r.needs_human_count} need human review)
                   </p>

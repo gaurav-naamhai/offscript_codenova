@@ -150,7 +150,12 @@ def test_image_pdf_placeholder_flags_are_unclear_and_needs_human(client):
     for f in flags:
         assert f["state"] == "unclear"
         assert f["needs_human"] is True
-        assert f["passage"] == ""
+        if f["origin"] == "error":
+            assert f["passage"] == "(whole submission)"
+            assert "extraction" in f["explanation"]
+        else:
+            assert f["passage"] == ""
+    assert check_res.json()["degraded_modules"]
 
 
 def test_flag_resolution_on_image_does_not_alter_bytes(client):
