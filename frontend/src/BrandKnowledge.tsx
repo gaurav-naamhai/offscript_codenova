@@ -196,9 +196,7 @@ export default function BrandKnowledge({
     <div className="knowledge-page">
       <header className="ki-heading">
         <h1>Brand knowledge.</h1>
-        <p>
-          One-time setup and living governance for <strong>{user.brand_name}</strong> — completely isolated from other organisations.
-        </p>
+        <p className="page-guidance">Add and manage the guidelines your team uses for reviews.</p>
       </header>
 
       <div className="ki-subtabs" role="tablist">

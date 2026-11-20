@@ -221,9 +221,7 @@ export default function NewReview({
     <div className="new-review">
       <header className="review-intro">
         <h1>Bring your next draft.</h1>
-        <p>
-          Reviewing strictly against <strong>{user.brand_name}</strong> approved guidelines and verified facts.
-        </p>
+        <p className="page-guidance">Paste content or upload a file to start a review.</p>
       </header>
 
       {user.role !== 'creator' && user.role !== 'manager' && (

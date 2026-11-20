@@ -287,7 +287,7 @@ function Header({
   )
 }
 
-function Hero({ onStart, onLibrary, brandName }: { onStart: () => void; onLibrary: () => void; brandName: string }) {
+function Hero({ onStart, onLibrary }: { onStart: () => void; onLibrary: () => void; brandName: string }) {
   return (
     <section className="hero">
       <div className="hero-copy">
@@ -296,9 +296,7 @@ function Hero({ onStart, onLibrary, brandName }: { onStart: () => void; onLibrar
           <br />
           the spotlight.
         </h1>
-        <p>
-          Verify drafts against <strong>{brandName}</strong> guidelines and live evidence — with human sign-off on every release.
-        </p>
+        <p className="page-guidance">Start a review or return to your recent work.</p>
         <div className="hero-actions">
           <button type="button" className="primary-button" onClick={onStart}>
             Start a review <Icon name="arrow" />

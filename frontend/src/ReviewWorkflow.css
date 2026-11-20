@@ -18,3 +18,10 @@
 @media(max-width:760px){.main:has(.workflow){display:block}.main:has(.workflow) > .page-enter{display:block}.main:has(.workflow) > .page-enter > .dashboard-grid{display:block;min-height:0}.workflow{display:block}.workflow-window{display:block}}
 @media(max-width:520px){.workflow{padding:16px}.workflow-window{padding:10px}.workflow-track{grid-template-columns:1fr;gap:12px}.workflow-scene{display:flex;flex-direction:column;gap:8px;padding:10px}.workflow-art{width:100%;flex:none;aspect-ratio:1}.workflow-copy{text-align:center}.workflow-card-title{font-size:20px}.workflow-description{font-size:14px}.workflow-scene[data-active='true']{transform:none;box-shadow:0 5px 10px #39211624}}
 @media(prefers-reduced-motion:reduce){.workflow-pause{display:none}.workflow-scene,.workflow-scene[data-active='true']{transform:none;border-color:transparent;box-shadow:inset 0 0 0 1px #d2c5bd,0 2px 6px #3f292016;transition:none}.workflow-art,.workflow-scene[data-active='true'] .workflow-art{opacity:1;transition:none}.workflow-art img,.workflow-scene[data-active='true'] .workflow-art img{translate:none;transition:none}}
+
+/* Keep the complete square artwork visible at the full card width. */
+.workflow-art { flex: none; width: 100%; aspect-ratio: 1; }
+.workflow-art img { position: static; width: 100%; height: 100%; object-fit: contain; }
+.workflow-scene { gap: 6px; padding: 5px 5px 10px; }
+@media (min-width: 961px) { .workflow-track { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; } }
+@media (min-width: 521px) and (max-width: 960px) { .workflow-track { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
