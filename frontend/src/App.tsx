@@ -714,7 +714,7 @@ function App() {
           ) : (
             <>
               <p className="judge-note dashboard-judge-note">
-                ★ For the judges: &#123; Overview of your active organisation&apos;s review pipeline — switch roles (Creator / Manager / Final Reviewer) or brands in the account menu to test RBAC and tenant isolation. &#125;
+                ★ For the judges: &#123; Start here — go to Brand Knowledge to check your brand&apos;s verified details or upload any guideline files, and use the account menu to switch roles (Creator / Manager / Final Reviewer). &#125;
               </p>
               <Hero
                 brandName={user.brand_name}

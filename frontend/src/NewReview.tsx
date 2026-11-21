@@ -220,7 +220,7 @@ export default function NewReview({
   return (
     <div className="new-review">
       <p className="judge-note">
-        ★ For the judges: &#123; Submit text, images, or PDFs with live recurring-mistake draft hints; runs Extraction → Org-Isolated Brand RAG → Exa + TinyFish External Search → Gemini Verification. &#125;
+        ★ For the judges: &#123; Type a draft or upload an image/PDF and submit — your content is verified against our Brand RAG and External Search (Exa + TinyFish), our flagging system highlights what went wrong, and AI Confidence tells you whether it is safe to post. &#125;
       </p>
       <header className="review-intro">
         <h1>Bring your next draft.</h1>

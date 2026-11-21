@@ -667,7 +667,7 @@ export default function ReviewWorkspace({
   return (
     <div className="review-workspace">
       <p className="judge-note">
-        ★ For the judges: &#123; Shows Safe-to-Post status &amp; AI Confidence, Brand vs. External Search lenses, versioned Revise &amp; Resubmit, and role-enforced Approval or Override with compliance certificate export. &#125;
+        ★ For the judges: &#123; Verified against Brand RAG and External Search — check Safe-to-Post status &amp; AI Confidence above, switch between Brand Guidelines vs. External Search flags, Revise &amp; Resubmit, or Approve/Override by role. &#125;
       </p>
       <header className="workspace-intro">
         <div>

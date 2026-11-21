@@ -197,8 +197,8 @@ export default function BrandKnowledge({
       <p className="judge-note">
         ★ For the judges:{' '}
         {tab === 'rectify'
-          ? '{ Rule hygiene scanner that flags conflicting, unclear, duplicate, or expired rules — Managers can edit wording and atomically publish a new version via Postgres RPC while preserving history. }'
-          : '{ One-time guideline ingestion using section-aware chunking, pgvector + lexical Hybrid RAG, and an auto-compiled Brand Constitution isolated per organisation. }'}
+          ? '{ AI scans your chunked brand rules for conflicts, unclear wording, or expired claims — Managers can edit and atomically publish a cleaner version, then test it in New Review. }'
+          : '{ We use Hybrid RAG (pgvector + lexical search) to chunk out verified details from the PDFs/docs you upload. Next, head to New Review to test content against your verified brand guidelines. }'}
       </p>
       <header className="ki-heading">
         <h1>Brand knowledge.</h1>
