@@ -626,7 +626,7 @@ def create_app(
     ):
         """Create a new compliance submission."""
         user, effective_role, org_id, brand_name = _resolve_context(authorization, claimed_role=role)
-        require_role(effective_role, {"creator"}, "create submissions")
+        require_role(effective_role, {"creator", "manager"}, "create submissions")
         cleaned_text, file_bytes, file_name, file_mime = (
             await validate_submission_payload(content_type, text, file)
         )
@@ -685,7 +685,7 @@ def create_app(
         """Revise draft content, or create a new version requiring reapproval if already reviewed/approved."""
         user, effective_role, _, _ = _resolve_context(authorization, claimed_role=role)
         sub = await get_sub_or_404(app_repo, id, user=user)
-        require_role(effective_role, {"creator"}, "revise submissions")
+        require_role(effective_role, {"creator", "manager"}, "revise submissions")
 
         was_approved_or_final = sub.status in {"final_approval", "approved"}
         can_auto_version = (
@@ -801,7 +801,7 @@ def create_app(
         )
         sub = await get_sub_or_404(app_repo, id, user=user)
         role = effective_role if user else (payload.role or "creator")
-        require_role(role, {"creator"}, "resolve flags")
+        require_role(role, {"creator", "manager"}, "resolve flags")
         if payload.action not in {"accept", "dismiss"}:
             raise HTTPException(
                 status_code=422, detail="Action must be 'accept' or 'dismiss'"
@@ -879,7 +879,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         role = effective_role if user else (claimed or "creator")
-        require_role(role, {"creator"}, "recheck flags")
+        require_role(role, {"creator", "manager"}, "recheck flags")
         sub = await get_sub_or_404(app_repo, id, user=user)
         if sub.content_type != "text":
             raise HTTPException(
@@ -999,7 +999,7 @@ def create_app(
         claimed_role = payload.role if payload else None
         user, effective_role, _, _ = _resolve_context(authorization, claimed_role=claimed_role)
         sub = await get_sub_or_404(app_repo, id, user=user)
-        require_role(effective_role, {"creator"}, "run checks")
+        require_role(effective_role, {"creator", "manager"}, "run checks")
         if sub.status != "draft":
             raise HTTPException(
                 status_code=409,
@@ -1071,7 +1071,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         sub = await get_sub_or_404(app_repo, id, user=user)
-        require_role(effective_role, {"creator"}, "retry checks")
+        require_role(effective_role, {"creator", "manager"}, "retry checks")
 
         existing_flags = await app_repo.get_flags(id, version=sub.version)
         has_error_flags = any(f.origin == "error" for f in existing_flags)
@@ -1489,7 +1489,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         if user:
-            require_role(effective_role, {"manager", "authorised_reviewer"}, "scan guidelines for rectification")
+            require_role(effective_role, {"creator", "manager", "authorised_reviewer"}, "scan guidelines for rectification")
         from retrieval.brand_rag import get_org_active_chunks
 
         chunks = await run_in_threadpool(get_org_active_chunks, org_id)
@@ -1517,7 +1517,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         role = effective_role if user else (claimed or "manager")
-        require_role(role, {"manager"}, "approve guideline rectifications")
+        require_role(role, {"creator", "manager"}, "approve guideline rectifications")
 
         rect = await app_repo.get_rectification(org_id, rect_id)
         if not rect:
@@ -1569,7 +1569,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         role = effective_role if user else (claimed or "manager")
-        require_role(role, {"manager"}, "dismiss guideline rectifications")
+        require_role(role, {"creator", "manager"}, "dismiss guideline rectifications")
 
         rect = await app_repo.get_rectification(org_id, rect_id)
         if not rect:
@@ -1627,7 +1627,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         if user:
-            require_role(effective_role, {"manager", "authorised_reviewer"}, "upload brand guidelines")
+            require_role(effective_role, {"creator", "manager", "authorised_reviewer"}, "upload brand guidelines")
 
         clean_title = title.strip()
         if not clean_title:
@@ -1669,7 +1669,7 @@ def create_app(
             require_explicit_role_when_unauth=False,
         )
         if user:
-            require_role(effective_role, {"manager", "authorised_reviewer"}, "deactivate brand guidelines")
+            require_role(effective_role, {"creator", "manager", "authorised_reviewer"}, "deactivate brand guidelines")
         try:
             from retrieval.brand_rag import deactivate_brand_doc
 

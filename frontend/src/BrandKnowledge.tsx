@@ -186,8 +186,8 @@ export default function BrandKnowledge({
     }
   }
 
-  const canManageDocs = user.role === 'manager' || user.role === 'authorised_reviewer'
-  const canApproveRect = user.role === 'manager'
+  const canManageDocs = user.role === 'creator' || user.role === 'manager' || user.role === 'authorised_reviewer'
+  const canApproveRect = user.role === 'creator' || user.role === 'manager'
   const activeDoc = docs.find(d => d.id === selected)
   const filtered = docs.filter(matches)
   const pendingCount = rectifications.filter(r => r.status === 'pending').length

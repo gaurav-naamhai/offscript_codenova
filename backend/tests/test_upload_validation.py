@@ -35,7 +35,7 @@ def test_non_creator_role_rejected(client):
         assert response.status_code == 403
         data = response.json()
         assert data["error"]["code"] == "forbidden"
-        assert "Only creators" in data["error"]["message"]
+        assert "not authorized" in data["error"]["message"]
 
     # Manager has full access to create submissions
     mgr_res = client.post(

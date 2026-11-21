@@ -350,6 +350,7 @@ def test_guideline_rectification_scan_approve_and_version_preservation():
     client = _make_strict_client()
     bl_manager = _login(client, "manager@brightleaf.co", "brightleaf123")
     bl_creator = _login(client, "creator@brightleaf.co", "brightleaf123")
+    bl_reviewer = _login(client, "reviewer@brightleaf.co", "brightleaf123")
 
     # Upload guidelines containing expired, unclear, conflicting, and duplicate rules
     doc_v1 = (
@@ -382,12 +383,12 @@ def test_guideline_rectification_scan_approve_and_version_preservation():
     assert "unclear" in issue_types
     assert "duplicate" in issue_types or "conflicting" in issue_types
 
-    # Creator cannot approve guideline rectification (403)
+    # Final Reviewer cannot approve guideline rectification (403); Creator & Manager can
     target = next(r for r in rects if r["issue_type"] == "unclear")
     forbidden = client.post(
         f"/brand-docs/rectifications/{target['id']}/approve",
         json={"approved_wording": "Use active voice and avoid vague superlatives."},
-        headers=_auth_header(bl_creator),
+        headers=_auth_header(bl_reviewer),
     )
     assert forbidden.status_code == 403
 
