@@ -10,7 +10,7 @@ Inkloom AI is an intelligent brand safety assistant for marketing teams, copywri
 
 ### 1. Try It in Your Browser
 If you have access to our live web deployment, navigate to:
-* **Web Application:** `https://offscript-codenova.onrender.com` (or your team's hosted frontend URL)
+* **Web Application:** `https://offscript-codenova.onrender.com`
 * *Note on free-tier cloud instances:* If the server has been idle, it may take 30–50 seconds on the first request to wake up. A countdown timer will show you the status.
 
 ### 2. Instant 1-Click Demo Sign-In
