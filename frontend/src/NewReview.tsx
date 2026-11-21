@@ -222,9 +222,19 @@ export default function NewReview({
       <p className="judge-note">
         ★ For the judges: &#123; Type a draft or upload an image/PDF and submit — your content is verified against our Brand RAG and External Search (Exa + TinyFish), our flagging system highlights what went wrong, and AI Confidence tells you whether it is safe to post. &#125;
       </p>
-      <header className="review-intro">
-        <h1>Bring your next draft.</h1>
-        <p className="page-guidance">Paste content or upload a file to start a review.</p>
+      <header className="review-intro review-intro-bar">
+        <div>
+          <h1>Bring your next draft.</h1>
+          <p className="page-guidance">Paste content or upload a file to start a review.</p>
+        </div>
+        <button
+          type="button"
+          className="primary-button"
+          onClick={submitForReview}
+          disabled={busy || (user.role !== 'creator' && user.role !== 'manager')}
+        >
+          {busy ? statusMessage : 'Submit for review'} <span aria-hidden="true">→</span>
+        </button>
       </header>
 
       {user.role !== 'creator' && user.role !== 'manager' && (
@@ -256,7 +266,7 @@ export default function NewReview({
           {draft.format === 'Text' ? (
             <div className="field">
               <label htmlFor="draft-text">Content <span aria-hidden="true">*</span></label>
-              <textarea id="draft-text" value={draft.text} onChange={event => update('text', event.target.value)} maxLength={50000} rows={7} required aria-describedby="character-count" placeholder="Paste draft text here..." disabled={busy} />
+              <textarea id="draft-text" value={draft.text} onChange={event => update('text', event.target.value)} maxLength={50000} rows={5} required aria-describedby="character-count" placeholder="Paste draft text here..." disabled={busy} />
               <p className="character-count" id="character-count">{draft.text.length.toLocaleString()} / 50,000 characters</p>
 
               {liveHints.length > 0 && (
@@ -273,6 +283,27 @@ export default function NewReview({
           ) : (
             <FilePicker format={draft.format} file={currentFile} onFile={file => setFile(draft.format as 'Image' | 'PDF', file)} error={fileError} />
           )}
+
+          {errors.length > 0 && (
+            <div className="validation" role="alert">
+              <strong>Please address the following:</strong>
+              <ul>{errors.map(error => <li key={error}>{error}</li>)}</ul>
+            </div>
+          )}
+
+          <div className="review-inline-submit">
+            <span className="character-count" style={{ textAlign: 'left', margin: 0 }}>
+              Draft auto-saved locally. Final publication requires Manager &amp; Reviewer approval.
+            </span>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={submitForReview}
+              disabled={busy || (user.role !== 'creator' && user.role !== 'manager')}
+            >
+              {busy ? statusMessage : 'Submit for review'} <span aria-hidden="true">→</span>
+            </button>
+          </div>
         </section>
 
         <div className="review-side">
@@ -283,22 +314,6 @@ export default function NewReview({
 
       <div role="status" aria-live="polite" aria-atomic="true">
         {statusMessage && <p className="save-feedback">{statusMessage}</p>}
-      </div>
-
-      {errors.length > 0 && (
-        <div className="validation" role="alert">
-          <strong>Please address the following:</strong>
-          <ul>{errors.map(error => <li key={error}>{error}</li>)}</ul>
-        </div>
-      )}
-
-      <div className="review-footer">
-        <p>Draft auto-saved locally. Final publication always requires Manager &amp; Reviewer approval.</p>
-        <div>
-          <button type="button" className="primary-button" onClick={submitForReview} disabled={busy || (user.role !== 'creator' && user.role !== 'manager')}>
-            {busy ? statusMessage : 'Submit for review'} <span aria-hidden="true">→</span>
-          </button>
-        </div>
       </div>
     </div>
   )
