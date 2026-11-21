@@ -293,40 +293,111 @@ def create_app(
             raise HTTPException(status_code=422, detail="role is required")
         return None, role or "creator", "inkloom", "Inkloom AI"
 
-    async def _seed_data(org_id: str = "inkloom", brand_name: str = "Inkloom AI") -> List[Submission]:
+    async def _seed_data(
+        org_id: str = "inkloom",
+        brand_name: str = "Inkloom AI",
+        fast_startup: bool = False,
+    ) -> List[Submission]:
         now_iso = datetime.now(timezone.utc).isoformat()
-        seeds = [
-            (
-                "Summer Campaign Announcement",
-                "Small business owners",
-                "Marketing email",
-                "Reviewing new promotional email draft for tone consistency and claim accuracy.",
-                "draft",
-                f"{brand_name} helps distributed marketing teams prevent brand violations.",
-                False,
-                False,
-            ),
-            (
-                "Enterprise SLA Performance Sheet",
-                "Enterprise IT buyers",
-                "Website",
-                "Checking uptime and performance claims against verified SLA standards.",
-                "manager_review",
-                "Industry-leading 99.9% uptime SLA with real-time audit logging.",
-                True,
-                False,
-            ),
-            (
-                "Q4 Brand Governance Overview",
-                "Brand & legal stakeholders",
-                "Social media",
-                "Approved executive summary of compliance achievements.",
-                "approved",
-                "Trusted compliance automation for enterprise publishing.",
-                True,
-                True,
-            ),
-        ]
+        if org_id == "brightleaf":
+            seeds = [
+                (
+                    "Spring Cold-Pressed Tea Launch",
+                    "Organic beverage shoppers",
+                    "Marketing email",
+                    "Drafting launch email for BrightLeaf Organics botanical teas.",
+                    "draft",
+                    "BrightLeaf Organics crafts USDA Organic cold-pressed teas in 100% recycled bottles.",
+                    False,
+                    False,
+                ),
+                (
+                    "Weekend Flash Promo Copy",
+                    "Newsletter subscribers",
+                    "Social media",
+                    "Checking discount cap and health claim accuracy before Manager sign-off.",
+                    "manager_review",
+                    "Enjoy 40% off Brightleaf drinks today — clinically proven to cure afternoon fatigue!",
+                    True,
+                    False,
+                ),
+                (
+                    "Q4 Sustainability & Packaging Brief",
+                    "Retail partners",
+                    "Website",
+                    "Approved product overview aligned with BrightLeaf Organics guidelines.",
+                    "approved",
+                    "BrightLeaf Organics uses 100% post-consumer recycled packaging across all beverage lines.",
+                    True,
+                    True,
+                ),
+            ]
+        elif org_id == "nike":
+            seeds = [
+                (
+                    "Air Max Seasonal Drop Teaser",
+                    "Runners & athletes",
+                    "Social media",
+                    "Draft campaign copy for upcoming footwear release.",
+                    "draft",
+                    "Engineered for responsive cushioning on every mile.",
+                    False,
+                    False,
+                ),
+                (
+                    "Pro Training Banner Claim Check",
+                    "Performance athletes",
+                    "Website",
+                    "Verifying performance superlative and brand voice rules.",
+                    "manager_review",
+                    "Guaranteed to make every athlete 50% faster overnight.",
+                    True,
+                    False,
+                ),
+                (
+                    "Just Do It Heritage Campaign",
+                    "Global community",
+                    "Marketing email",
+                    "Approved brand storytelling piece.",
+                    "approved",
+                    "Built for athletes pushing boundaries every day.",
+                    True,
+                    True,
+                ),
+            ]
+        else:
+            seeds = [
+                (
+                    "Summer Campaign Announcement",
+                    "Small business owners",
+                    "Marketing email",
+                    "Reviewing new promotional email draft for tone consistency and claim accuracy.",
+                    "draft",
+                    f"{brand_name} helps distributed marketing teams prevent brand violations.",
+                    False,
+                    False,
+                ),
+                (
+                    "Enterprise SLA Performance Sheet",
+                    "Enterprise IT buyers",
+                    "Website",
+                    "Checking uptime and performance claims against verified SLA standards.",
+                    "manager_review",
+                    "Industry-leading 99.9% uptime SLA with real-time audit logging.",
+                    True,
+                    False,
+                ),
+                (
+                    "Q4 Brand Governance Overview",
+                    "Brand & legal stakeholders",
+                    "Social media",
+                    "Approved executive summary of compliance achievements.",
+                    "approved",
+                    "Trusted compliance automation for enterprise publishing.",
+                    True,
+                    True,
+                ),
+            ]
         seeded: List[Submission] = []
         for idx, (title, audience, channel, context, st, txt, run_pipe, do_dec) in enumerate(seeds, 1):
             sub = Submission(
@@ -353,16 +424,75 @@ def create_app(
                 timestamp=now_iso,
             )
             if run_pipe:
-                fl, _ = run_pipeline(
-                    ContentPayload(
-                        content_type="text",
-                        text=txt,
-                        org_id=org_id,
-                        brand_name=brand_name,
-                    ),
-                    sub.id,
-                    1,
-                )
+                if fast_startup:
+                    if st == "approved":
+                        fl = [
+                            Flag(
+                                id=str(uuid.uuid4()),
+                                submission_id=sub.id,
+                                version=1,
+                                finding_type="brand",
+                                origin="module",
+                                state="aligned",
+                                location="line 1",
+                                passage=txt,
+                                explanation=f"Copy aligns with {brand_name} approved brand facts and tone.",
+                                why_it_matters="Confirmed alignment with active brand guidelines.",
+                                suggested_correction=None,
+                                status="resolved",
+                                needs_human_review=False,
+                                source_title=f"{brand_name} Guidelines",
+                                created_at=now_iso,
+                            )
+                        ]
+                    else:
+                        fl = [
+                            Flag(
+                                id=str(uuid.uuid4()),
+                                submission_id=sub.id,
+                                version=1,
+                                finding_type="brand",
+                                origin="module",
+                                state="potential_issue",
+                                location="line 1",
+                                passage=txt,
+                                explanation=f"Claim conflicts with {brand_name} verified promotional/claim standards.",
+                                why_it_matters=f"Publishing claims that contradict {brand_name} rules risks compliance and brand trust.",
+                                suggested_correction=f"Revise copy to stay within {brand_name} approved guidelines.",
+                                status="open",
+                                needs_human_review=True,
+                                source_title=f"{brand_name} Guidelines",
+                                created_at=now_iso,
+                            ),
+                            Flag(
+                                id=str(uuid.uuid4()),
+                                submission_id=sub.id,
+                                version=1,
+                                finding_type="claim",
+                                origin="module",
+                                state="insufficient_evidence",
+                                location="line 1",
+                                passage=txt,
+                                explanation="External search could not verify this superlative/performance claim with an authoritative source.",
+                                why_it_matters="Unsubstantiated performance or health claims can trigger regulatory or customer disputes.",
+                                suggested_correction="Remove unverified performance/medical claims or cite an approved source.",
+                                status="open",
+                                needs_human_review=True,
+                                source_title="External Grounding Check",
+                                created_at=now_iso,
+                            ),
+                        ]
+                else:
+                    fl, _ = run_pipeline(
+                        ContentPayload(
+                            content_type="text",
+                            text=txt,
+                            org_id=org_id,
+                            brand_name=brand_name,
+                        ),
+                        sub.id,
+                        1,
+                    )
                 await app_repo.set_flags(sub.id, fl, 1)
                 await record_audit(app_repo, sub.id, "creator", "check_completed", f"Check completed with {len(fl)} flags", timestamp=now_iso)
             if do_dec:
@@ -463,7 +593,12 @@ def create_app(
         if app_settings.demo_mode:
             existing = await app_repo.list_submissions()
             if not existing:
-                await _seed_data()
+                for demo_org, demo_brand in (
+                    ("brightleaf", "BrightLeaf"),
+                    ("nike", "Nike"),
+                    ("inkloom", "Inkloom AI"),
+                ):
+                    await _seed_data(org_id=demo_org, brand_name=demo_brand, fast_startup=True)
         yield
         for t in list(background_tasks):
             t.cancel()

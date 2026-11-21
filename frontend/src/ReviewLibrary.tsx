@@ -12,9 +12,7 @@ export default function ReviewLibrary({
 }) {
   const [items, setItems] = useState<SubmissionSummary[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [feedback, setFeedback] = useState('')
   const [query, setQuery] = useState('')
   const [format, setFormat] = useState('All')
   const [status, setStatus] = useState('All')
@@ -35,22 +33,6 @@ export default function ReviewLibrary({
     void fetchSubmissions()
   }, [fetchSubmissions])
 
-  async function handleSeed() {
-    setBusy(true)
-    setError('')
-    setFeedback('Seeding sample submissions for demonstration...')
-    try {
-      await serverApi.seed()
-      await fetchSubmissions()
-      setFeedback('Sample submissions seeded successfully.')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to seed demo submissions.')
-      setFeedback('')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const filtered = items.filter(r => {
     const titleMatch = (r.title || 'Untitled submission').toLowerCase().includes(query.trim().toLowerCase())
     const formatMatch = format === 'All' || r.content_type.toLowerCase() === format.toLowerCase()
@@ -69,16 +51,12 @@ export default function ReviewLibrary({
           <p className="page-guidance">Find and open your drafts and reviews.</p>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button type="button" className="outline-button" onClick={handleSeed} disabled={busy || loading} title="Seed 3 sample submissions into the server">
-            {busy ? 'Seeding...' : 'Seed demo submissions'}
-          </button>
           <button type="button" className="primary-button" onClick={onNew}>
             New review <span aria-hidden="true">→</span>
           </button>
         </div>
       </header>
 
-      {feedback && <p className="library-note" role="status" style={{ color: '#e3c8f4' }}>{feedback}</p>}
       {error && <div className="validation" role="alert" style={{ margin: '12px 0' }}>{error}</div>}
 
       <div className="panel library-panel">
@@ -143,7 +121,7 @@ export default function ReviewLibrary({
           <div className="library-empty">
             {items.length
               ? 'No reviews match these filters.'
-              : 'No submissions in server database. Click "Seed demo submissions" above or start your first review.'}
+              : 'No submissions yet. Start your first review above.'}
           </div>
         )}
       </div>
