@@ -335,6 +335,3 @@
   .summary-item { min-height: 60px; padding: 10px 22px; }
   .summary-item + .summary-item { border-left: 0; border-top: 1px solid #b9aaa3; }
 }
-
-.page-guidance { display: inline-block; max-width: 100%; padding: 8px 12px; border-radius: 10px; background: rgba(255, 248, 242, .1); line-height: 1.5; }
-.hero .page-guidance { color: #f4e8e4; }

@@ -296,7 +296,6 @@ function Hero({ onStart, onLibrary }: { onStart: () => void; onLibrary: () => vo
           <br />
           the spotlight.
         </h1>
-        <p className="page-guidance">Start a review or return to your recent work.</p>
         <div className="hero-actions">
           <button type="button" className="primary-button" onClick={onStart}>
             Start a review <Icon name="arrow" />

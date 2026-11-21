@@ -225,7 +225,6 @@ export default function NewReview({
       <header className="review-intro review-intro-bar">
         <div>
           <h1>Bring your next draft.</h1>
-          <p className="page-guidance">Paste content or upload a file to start a review.</p>
         </div>
         <button
           type="button"

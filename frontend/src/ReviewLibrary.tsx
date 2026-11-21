@@ -48,7 +48,6 @@ export default function ReviewLibrary({
       <header className="library-heading">
         <div>
           <h1>Review library.</h1>
-          <p className="page-guidance">Find and open your drafts and reviews.</p>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button type="button" className="primary-button" onClick={onNew}>

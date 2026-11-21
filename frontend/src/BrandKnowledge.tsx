@@ -202,7 +202,6 @@ export default function BrandKnowledge({
       </p>
       <header className="ki-heading">
         <h1>Brand knowledge.</h1>
-        <p className="page-guidance">Add and manage the guidelines your team uses for reviews.</p>
       </header>
 
       <div className="ki-subtabs" role="tablist">

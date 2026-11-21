@@ -43,7 +43,6 @@ export default function Insights({
       </p>
       <header className="ki-heading">
         <h1>Insights.</h1>
-        <p className="page-guidance">Explore recurring findings across your reviews.</p>
       </header>
 
       <div style={{ display: 'flex', gap: '10px', margin: '14px 0 18px', flexWrap: 'wrap' }}>
