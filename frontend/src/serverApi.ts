@@ -83,6 +83,7 @@ export type SubmissionSummary = {
   created_at: string
   flag_count: number
   needs_human_count: number
+  readiness_status?: string | null
 }
 
 export type EvidenceMode = 'internal_only' | 'external_only' | 'combined' | 'insufficient_evidence'
@@ -391,9 +392,9 @@ function submission(value: unknown): ServerSubmission {
   return s as ServerSubmission
 }
 
-async function request(path: string, init?: RequestInit): Promise<Response> {
+async function request(path: string, init?: RequestInit, timeoutMs = 90000): Promise<Response> {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), 90000)
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
     const headers = new Headers(init?.headers)
     const token = getStoredToken()
@@ -446,7 +447,7 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 
 export const serverApi = {
   async authAccounts(): Promise<DemoAccount[]> {
-    const data = (await (await request('/auth/accounts')).json()) as { accounts?: DemoAccount[] }
+    const data = (await (await request('/auth/accounts', undefined, 20000)).json()) as { accounts?: DemoAccount[] }
     return data.accounts || []
   },
 
@@ -456,7 +457,7 @@ export const serverApi = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-      })
+      }, 30000)
     ).json()) as { access_token: string; user: AuthUser }
     setAuthSession(res.access_token, res.user)
     return res

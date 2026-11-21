@@ -12,7 +12,6 @@ import {
   AUTH_SESSION_EVENT,
   isAuthStorageKey,
   clearAuthSession,
-  DEFAULT_DEMO_ACCOUNT,
   getStoredToken,
   getStoredUser,
   serverApi,
@@ -345,7 +344,7 @@ function StatusSummary({ submissions }: { submissions: SubmissionSummary[] }) {
 
 function App() {
   const initial = parseHashRoute()
-  const [user, setUser] = useState<AuthUser | null>(() => getStoredUser() || DEFAULT_DEMO_ACCOUNT.user)
+  const [user, setUser] = useState<AuthUser | null>(() => getStoredToken() ? getStoredUser() : null)
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [backendPhase, setBackendPhase] = useState<'waking' | 'authenticating' | 'ready'>('waking')
   const [showWakeBanner, setShowWakeBanner] = useState(true)
@@ -377,7 +376,7 @@ function App() {
     }
   }, [backendPhase])
 
-  // Dynamic Render backend wake-up monitor + automatic demo login
+  // Probe service availability without blocking the independently loaded sign-in choices.
   useEffect(() => {
     let active = true
     const startedAt = Date.now()
@@ -404,26 +403,12 @@ function App() {
       setBackendPhase('authenticating')
 
       const tok = getStoredToken()
-      try {
-        if (tok) {
-          const verified = await serverApi.me()
-          if (active) setUser(verified)
-        } else {
-          const loginRes = await serverApi.login(
-            DEFAULT_DEMO_ACCOUNT.email,
-            DEFAULT_DEMO_ACCOUNT.password
-          )
-          if (active) setUser(loginRes.user)
-        }
-      } catch {
+      if (tok) {
         try {
-          const fallback = await serverApi.login(
-            DEFAULT_DEMO_ACCOUNT.email,
-            DEFAULT_DEMO_ACCOUNT.password
-          )
-          if (active) setUser(fallback.user)
+          const verified = await serverApi.me()
+          if (active && getStoredToken() === tok) setUser(verified)
         } catch {
-          // keep demo preview user if login fails
+          if (active && getStoredToken() === tok) clearAuthSession()
         }
       }
 
@@ -605,20 +590,14 @@ function App() {
             <div className="backend-wakeup-top">
               <strong>
                 {backendPhase === 'ready'
-                  ? `Backend connected (${wakeLatencyMs != null ? `${(wakeLatencyMs / 1000).toFixed(1)}s` : 'ready'}) — live demo session synced`
+                  ? `Backend connected (${wakeLatencyMs != null ? `${(wakeLatencyMs / 1000).toFixed(1)}s` : 'ready'})`
                   : backendPhase === 'authenticating'
-                    ? 'Backend awake — signing into BrightLeaf demo workspace…'
-                    : 'Waking up Render backend (free-tier cold start)…'}
+                    ? 'Backend awake — verifying saved session…'
+                    : 'Checking server availability…'}
               </strong>
               <div className="backend-wakeup-meta">
                 {backendPhase === 'waking' && (
                   <>
-                    <span>
-                      {wakeElapsedSec < 55
-                        ? `~${55 - wakeElapsedSec}s est. remaining`
-                        : 'Finalizing startup…'}
-                    </span>
-                    <span>•</span>
                     <span>{wakeElapsedSec}s elapsed</span>
                     <span>•</span>
                     <span>Live /health ping #{wakePingCount}</span>
@@ -635,19 +614,6 @@ function App() {
                 )}
               </div>
             </div>
-            {backendPhase !== 'ready' && (
-              <div className="backend-wakeup-track" aria-hidden="true">
-                <div
-                  className="backend-wakeup-fill"
-                  style={{
-                    width:
-                      backendPhase === 'authenticating'
-                        ? '96%'
-                        : `${Math.min(92, Math.max(6, Math.round((wakeElapsedSec / 55) * 92)))}%`,
-                  }}
-                />
-              </div>
-            )}
           </div>
         )}
         {error && (

@@ -56,12 +56,15 @@ RULES = [
 def retrieve_guidelines(content: ContentPayload) -> List[GuidelineRef]:
     """Retrieve relevant brand and claim guidelines for the submitted content."""
     try:
+        from app.config import Settings
         from retrieval.config import GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL
-        if not (GEMINI_API_KEY and SUPABASE_URL and SUPABASE_KEY):
-            return [r["guideline"] for r in RULES]
-
-        from retrieval.brand_rag import retrieve_guidelines as rag_retrieve
+        from retrieval.brand_rag import list_brand_docs, retrieve_guidelines as rag_retrieve
         from retrieval.schemas import ContentPayload as RetrievalPayload
+
+        org_id = getattr(content, "org_id", None)
+        configured = bool(GEMINI_API_KEY and SUPABASE_URL and SUPABASE_KEY)
+        if Settings().mock_ai and not configured and not (org_id and list_brand_docs(org_id=org_id)):
+            return [r["guideline"] for r in RULES]
 
         payload = RetrievalPayload(
             content_type=content.content_type,
@@ -69,15 +72,21 @@ def retrieve_guidelines(content: ContentPayload) -> List[GuidelineRef]:
             file_name=content.file_name,
             file_mime=content.file_mime,
             file_bytes=content.file_bytes,
-            org_id=getattr(content, "org_id", None),
+            org_id=org_id,
             brand_name=getattr(content, "brand_name", None),
             extracted_text=getattr(content, "extracted_text", None),
         )
         results = rag_retrieve(
             payload,
-            org_id=getattr(content, "org_id", None),
+            org_id=org_id,
             brand_name=getattr(content, "brand_name", None),
         )
+        expected_org = (getattr(content, "org_id", None) or "").strip().lower()
+        if not expected_org:
+            raise RuntimeError("Organisation is required for guideline retrieval.")
+        if any((g.org_id or "").strip().lower() != expected_org for g in results):
+            raise RuntimeError("Guideline retrieval returned a document from another organisation.")
         return [GuidelineRef(**g.model_dump()) for g in results]
     except Exception:
-        return [r["guideline"] for r in RULES]
+        # Let the pipeline record a retrieval error and mark the review incomplete.
+        raise

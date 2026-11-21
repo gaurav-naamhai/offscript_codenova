@@ -73,7 +73,8 @@ from app.models import (
     VersionSnapshot,
 )
 from app.pipeline import run_pipeline
-from app.repository import SubmissionRepository, get_repository
+from app.repository import ConcurrentSubmissionChange, SubmissionRepository, get_repository
+from app.review_state import current_review_state
 
 logger = logging.getLogger("inkloom_app")
 
@@ -264,6 +265,14 @@ def _blocking_flags(flags: List[Flag]) -> List[Flag]:
             or f.state in {"potential_issue", "contradicted", "insufficient_evidence", "unclear"}
         )
     ]
+
+
+def _review_summary(sub: Submission, flags: List[Flag], decisions: List[Decision] = ()) -> Tuple[Optional[int], Optional[int], str]:
+    state = current_review_state(sub, flags, decisions)
+    if state in {"not_checked", "review_in_progress", "review_incomplete"}:
+        return None, None, state
+    brand_score, fact_score, _ = compute_fidelity_scores(flags)
+    return brand_score, fact_score, state
 
 
 def create_app(
@@ -510,8 +519,13 @@ def create_app(
         actor_role: str,
         x_actor: Optional[str],
     ) -> Tuple[List[Flag], list]:
+        expected_version = sub.version
+        job_id = sub.processing_job_id
+        if not job_id:
+            raise RuntimeError("Review job identity is missing")
         def _progress_update(stage: str) -> None:
             sub.processing_stage = stage
+            app_repo.update_check_stage(sub.id, expected_version, job_id, stage)
             sub.updated_at = datetime.now(timezone.utc).isoformat()
 
         content = ContentPayload(
@@ -546,14 +560,14 @@ def create_app(
                 x_actor=x_actor,
             )
 
-        await app_repo.set_flags(sub.id, flags, version=sub.version)
         completed_iso = datetime.now(timezone.utc).isoformat()
         sub.status = "manager_review"
         sub.processing_stage = "completed"
         sub.processing_error = None
+        sub.processing_job_id = None
         sub.updated_at = completed_iso
-        await app_repo.update_submission(sub)
-        await app_repo.save_version_snapshot(sub.id, _snapshot_from_submission(sub))
+        if not await app_repo.complete_check(sub, expected_version, job_id, flags, _snapshot_from_submission(sub)):
+            raise RuntimeError("Review results belong to an older job or version")
 
         await record_audit(
             app_repo,
@@ -570,15 +584,14 @@ def create_app(
         sub = await app_repo.get_submission(sub_id)
         if not sub:
             return
+        job_id = sub.processing_job_id
+        version = sub.version
         try:
             await _execute_check_for_submission(sub, actor_role, x_actor)
         except Exception as exc:
             logger.error("Async compliance check failed for %s: %s", sub_id, exc, exc_info=True)
-            sub.status = "draft"
-            sub.processing_stage = "failed"
-            sub.processing_error = str(exc)
-            sub.updated_at = datetime.now(timezone.utc).isoformat()
-            await app_repo.update_submission(sub)
+            if not await app_repo.fail_check(sub.id, version, job_id or "", str(exc)):
+                return
             await record_audit(
                 app_repo,
                 sub.id,
@@ -612,6 +625,10 @@ def create_app(
     )
     app.state.settings = app_settings
     app.state.repo = app_repo
+
+    @app.exception_handler(ConcurrentSubmissionChange)
+    async def concurrent_submission_handler(request: Request, exc: ConcurrentSubmissionChange):
+        return JSONResponse(status_code=409, content={"error": {"code": "conflict", "message": "The submission changed during this action. Refresh before trying again."}})
 
     if app_settings.cors_origins:
         allow_all = app_settings.cors_origins == ["*"]
@@ -725,6 +742,7 @@ def create_app(
         results = []
         for sub in submissions:
             flags = await app_repo.get_flags(sub.id, version=sub.version)
+            decisions = await app_repo.get_decisions(sub.id) if sub.status == "approved" else []
             results.append(
                 SubmissionListItem(
                     id=sub.id,
@@ -742,6 +760,7 @@ def create_app(
                     created_at=sub.created_at,
                     flag_count=len(flags),
                     needs_human_count=sum(1 for f in flags if f.needs_human),
+                    readiness_status=current_review_state(sub, flags, decisions),
                 )
             )
         return results
@@ -821,6 +840,9 @@ def create_app(
         user, effective_role, _, _ = _resolve_context(authorization, claimed_role=role)
         sub = await get_sub_or_404(app_repo, id, user=user)
         require_role(effective_role, {"creator", "manager"}, "revise submissions")
+
+        if sub.status == "ai_review":
+            raise HTTPException(409, "A check is in progress. Wait for it to finish before editing.")
 
         was_approved_or_final = sub.status in {"final_approval", "approved"}
         can_auto_version = (
@@ -1110,8 +1132,8 @@ def create_app(
         user, _, _, _ = _resolve_context(authorization, require_explicit_role_when_unauth=False)
         sub = await get_sub_or_404(app_repo, id, user=user)
         flags = await app_repo.get_flags(id, version=sub.version)
-        stage = sub.processing_stage or ("completed" if sub.status != "ai_review" else "extracting")
-        pct = STAGE_PROGRESS_PCT.get(stage, 100 if sub.status != "ai_review" else 35)
+        stage = sub.processing_stage or ("extracting" if sub.status == "ai_review" else None)
+        pct = STAGE_PROGRESS_PCT.get(stage, 0)
         return SubmissionStatusResponse(
             id=sub.id,
             status=sub.status,
@@ -1143,11 +1165,14 @@ def create_app(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         actor_label = user.name if user else x_actor
+        expected_version, expected_status = sub.version, sub.status
         sub.status = "ai_review"
         sub.processing_stage = "extracting"
         sub.processing_error = None
+        sub.processing_job_id = str(uuid.uuid4())
         sub.updated_at = now_iso
-        await app_repo.update_submission(sub)
+        if not await app_repo.begin_check(sub, expected_version, expected_status):
+            raise HTTPException(409, "A newer version or check is already in progress.")
         await record_audit(
             app_repo,
             id,
@@ -1164,22 +1189,18 @@ def create_app(
                 daemon=True,
             )
             t.start()
-            return CheckResponse(submission=sub, flags=[], degraded_modules=[])
+            return CheckResponse(submission=sub, flags=[], degraded_modules=[], readiness_status="review_in_progress")
 
         try:
             flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
         except Exception as exc:
-            sub.status = "draft"
-            sub.processing_stage = "failed"
-            sub.processing_error = str(exc)
-            sub.updated_at = datetime.now(timezone.utc).isoformat()
-            await app_repo.update_submission(sub)
+            await app_repo.fail_check(sub.id, sub.version, sub.processing_job_id or "", str(exc))
             raise
 
         hist_flags = await app_repo.get_all_flags(org_id=sub.org_id if user else None)
         prior_flags = [hf for hf in hist_flags if hf.submission_id != sub.id]
         hints = compute_recurring_hints(flags, prior_flags, submission_text=sub.text or sub.extracted_text)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        b_score, f_score, readiness = _review_summary(sub, flags)
         return CheckResponse(
             submission=sub,
             flags=flags,
@@ -1210,7 +1231,7 @@ def create_app(
 
         existing_flags = await app_repo.get_flags(id, version=sub.version)
         has_error_flags = any(f.origin == "error" for f in existing_flags)
-        if sub.status not in {"draft", "ai_review"} and not (sub.status == "manager_review" and has_error_flags):
+        if sub.status != "draft" and not (sub.status == "manager_review" and has_error_flags):
             raise HTTPException(
                 status_code=409,
                 detail=f"Retry is only allowed on draft, failed, or degraded checks (current state: '{sub.status}').",
@@ -1218,11 +1239,14 @@ def create_app(
 
         now_iso = datetime.now(timezone.utc).isoformat()
         actor_label = user.name if user else x_actor
+        expected_version, expected_status = sub.version, sub.status
         sub.status = "ai_review"
         sub.processing_stage = "extracting"
         sub.processing_error = None
+        sub.processing_job_id = str(uuid.uuid4())
         sub.updated_at = now_iso
-        await app_repo.update_submission(sub)
+        if not await app_repo.begin_check(sub, expected_version, expected_status):
+            raise HTTPException(409, "A newer version or check is already in progress.")
         await record_audit(
             app_repo,
             id,
@@ -1239,10 +1263,15 @@ def create_app(
                 daemon=True,
             )
             t.start()
-            return CheckResponse(submission=sub, flags=[], degraded_modules=[])
+            return CheckResponse(submission=sub, flags=[], degraded_modules=[], readiness_status="review_in_progress")
 
-        flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        retry_job_id = sub.processing_job_id
+        try:
+            flags, degraded_modules = await _execute_check_for_submission(sub, effective_role, actor_label)
+        except Exception as exc:
+            await app_repo.fail_check(sub.id, sub.version, retry_job_id or "", str(exc))
+            raise
+        b_score, f_score, readiness = _review_summary(sub, flags)
         return CheckResponse(
             submission=sub,
             flags=flags,
@@ -1276,7 +1305,15 @@ def create_app(
         prior_flags = [hf for hf in hist_flags if hf.submission_id != sub.id]
         doc_text = (snapshot.text if snapshot and snapshot.text else None) or sub.text or sub.extracted_text
         hints = compute_recurring_hints(flags, prior_flags, submission_text=doc_text)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        summary_sub = sub
+        if version is not None and snapshot is not None:
+            summary_sub = sub.model_copy(update={
+                "version": target_version,
+                "status": snapshot.status,
+                "processing_stage": "completed" if snapshot.status in {"manager_review", "final_approval", "approved"} else None,
+                "processing_error": None,
+            })
+        b_score, f_score, readiness = _review_summary(summary_sub, flags, decisions)
 
         return SubmissionDetailResponse(
             submission=sub,
@@ -1331,6 +1368,10 @@ def create_app(
         # Unresolved findings / error flag gating before approval
         current_flags = await app_repo.get_flags(id, version=sub.version)
         blocking = _blocking_flags(current_flags)
+        if payload.decision == "approve" and current_review_state(sub, current_flags) in {
+            "not_checked", "review_in_progress", "review_incomplete"
+        }:
+            raise HTTPException(409, "The current version has not completed a reliable check. Run or retry the check before approval.")
         if payload.decision == "approve" and app_settings.enforce_approval_gates and blocking:
             reason = (payload.override_reason or "").strip()
             if not payload.override_unresolved or len(reason) < 10:
@@ -1357,6 +1398,8 @@ def create_app(
             sub.status = "draft"
             sub.version += 1
             sub.manager_approved_by = None
+            sub.processing_stage = None
+            sub.processing_error = None
         elif current_status == "manager_review":
             sub.status = "final_approval"
             if user:
@@ -1454,7 +1497,7 @@ def create_app(
         flags = await app_repo.get_flags(id, version=sub.version)
         decisions = await app_repo.get_decisions(id)
         audit = await app_repo.get_audit_events(id)
-        b_score, f_score, readiness = compute_fidelity_scores(flags)
+        b_score, f_score, readiness = _review_summary(sub, flags, decisions)
 
         external_urls = list(
             dict.fromkeys(
@@ -1486,6 +1529,7 @@ def create_app(
             "scores": {
                 "brand_fidelity_score": b_score,
                 "fact_confidence_score": f_score,
+                "score_note": "Heuristic review indicators, not calibrated probabilities of correctness.",
                 "readiness_status": readiness,
                 "total_flags": len(flags),
                 "resolved_flags": sum(1 for f in flags if f.status in ("accepted", "dismissed", "resolved")),

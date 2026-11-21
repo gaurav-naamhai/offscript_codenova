@@ -290,6 +290,8 @@ class Submission(BaseModel):
     manager_approved_by: Optional[str] = None
     processing_stage: Optional[str] = None
     processing_error: Optional[str] = None
+    processing_job_id: Optional[str] = None
+    storage_revision: int = Field(default=0, exclude=True)
     extracted_text: Optional[str] = None
     title: Optional[str] = None
     audience: Optional[str] = None
@@ -347,6 +349,7 @@ class SubmissionListItem(BaseModel):
     created_at: str
     flag_count: int
     needs_human_count: int
+    readiness_status: Optional[str] = None
 
 
 class VersionInfo(BaseModel):

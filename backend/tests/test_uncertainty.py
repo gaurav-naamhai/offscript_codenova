@@ -90,6 +90,7 @@ def test_pipeline_assigns_needs_human_correctly():
     flags, degraded = run_pipeline(
         content=content,
         submission_id="sub-unc-1",
+        retrieval_fn=lambda _: [],
         verification_fn=custom_verification,
         brand_check_fn=custom_brand,
     )

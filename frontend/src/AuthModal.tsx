@@ -64,7 +64,8 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
       onAuthenticated(res.user)
       onClose?.()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed.')
+      const message = err instanceof Error ? err.message : 'Sign-in failed.'
+      setError(message.startsWith('Request timed out') ? 'Sign-in could not be confirmed. The service may still be starting; please try again.' : message)
     } finally {
       authInFlight.current = false
       setBusy(false)
@@ -82,7 +83,8 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
       onAuthenticated(res.user)
       onClose?.()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid credentials.')
+      const message = err instanceof Error ? err.message : 'Sign-in failed.'
+      setError(message.startsWith('Request timed out') ? 'Sign-in could not be confirmed. The service may still be starting; please try again.' : message)
     } finally {
       authInFlight.current = false
       setBusy(false)

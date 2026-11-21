@@ -29,7 +29,8 @@ def test_audit_trail_captures_all_events(client, monkeypatch):
     # 4. Decision recorded event
     client.post(
         f"/submissions/{sub_id}/decision",
-        json={"role": "manager", "decision": "approve"},
+        # Retrieval failed, so approval must be blocked; changes can be requested.
+        json={"role": "manager", "decision": "request_changes", "comment": "Retry the incomplete check."},
     )
 
     # Fetch audit

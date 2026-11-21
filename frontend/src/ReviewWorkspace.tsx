@@ -10,6 +10,7 @@ import type {
   SubmissionStatus,
   VersionInfo,
 } from './serverApi'
+import { readinessExplanation, readinessLabel, reviewReadiness } from './reviewReadiness'
 import './ReviewWorkspace.css'
 
 type ReviewLens = 'brand' | 'claim' | 'all'
@@ -371,14 +372,15 @@ export default function ReviewWorkspace({
   const recurringHints = detail.recurring_hints || []
   const blockingCount = detail.unresolved_blocking_count ?? flags.filter(f => f.status === 'open' && (f.origin === 'error' || ['potential_issue', 'contradicted', 'insufficient_evidence', 'unclear'].includes(f.state))).length
   const hasBlockingError = flags.some(f => f.status === 'open' && f.origin === 'error')
-  const isSafeToPost = blockingCount === 0 && !hasBlockingError
-  const rawBrandScore = detail.brand_score ?? 100
-  const rawFactScore = detail.fact_score ?? 100
-  const aiConfidence = isSafeToPost
-    ? Math.round((rawBrandScore + rawFactScore) / 2)
-    : Math.min(rawBrandScore, rawFactScore)
-  const confidenceTier = aiConfidence >= 85 && isSafeToPost ? 'High' : aiConfidence >= 60 ? 'Medium' : 'Low'
-  const confidenceColor = confidenceTier === 'High' ? '#166534' : confidenceTier === 'Medium' ? '#92400e' : '#b91c1c'
+  const currentLiveStatus = liveStatus?.version === sub.version ? liveStatus : null
+  const displayStatus = isHistoricalView ? activeSnapshot?.status || 'draft' : currentLiveStatus?.status || sub.status
+  const displayStage = isHistoricalView ? (displayStatus === 'draft' ? null : 'completed') : currentLiveStatus?.processing_stage || sub.processing_stage
+  const readiness = hasBlockingError && displayStatus !== 'draft' && displayStatus !== 'ai_review'
+    ? 'review_incomplete'
+    : reviewReadiness(detail.readiness_status, displayStatus, displayStage)
+  const overrideDecisions = detail.decisions.filter(d => d.version === (isHistoricalView ? viewingVersion : sub.version) && d.decision === 'approve' && d.override_unresolved)
+  const managerOverrides = overrideDecisions.filter(d => d.role === 'manager')
+  const openRisks = flags.filter(f => f.status === 'open' && (f.origin === 'error' || ['potential_issue', 'contradicted', 'insufficient_evidence', 'unclear'].includes(f.state)))
 
   const otherChecks = flags.filter(f => ['aligned', 'supported'].includes(f.state) && f.origin !== 'error')
   const actionableFindings = flags.filter(f => !otherChecks.includes(f))
@@ -667,7 +669,7 @@ export default function ReviewWorkspace({
   return (
     <div className="review-workspace">
       <p className="judge-note">
-        ★ For the judges: &#123; Verified against Brand RAG and External Search — check Safe-to-Post status &amp; AI Confidence above, switch between Brand Guidelines vs. External Search flags, Revise &amp; Resubmit, or Approve/Override by role. &#125;
+        ★ For the judges: &#123; Review the current version's status and findings, switch between Brand Guidelines and External Verification, then revise or make a role-authorised decision. &#125;
       </p>
       <header className="workspace-intro">
         <div>
@@ -675,15 +677,15 @@ export default function ReviewWorkspace({
           <h1>{sub.title || 'Untitled submission'}</h1>
           <p>
             Format: <strong>{sub.content_type.toUpperCase()}</strong> · Status:{' '}
-            <strong style={{ color: sub.status === 'approved' ? '#6be092' : '#dec9f2' }}>
-              {sub.status.replace('_', ' ').toUpperCase()}
+            <strong style={{ color: readiness.startsWith('approved') ? '#6be092' : '#dec9f2' }}>
+              {readinessLabel(readiness)}
             </strong>{' '}
             · Current <strong>v{sub.version}</strong>
             {isHistoricalView && ` (Viewing archived v${viewingVersion})`}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {sub.status === 'approved' && (
+          {!isHistoricalView && readiness.startsWith('approved') && (
             <button type="button" className="workspace-outline" onClick={() => void handleExportCertificate()}>
               Export certificate
             </button>
@@ -699,42 +701,43 @@ export default function ReviewWorkspace({
         </div>
       </header>
 
-      {/* Simple Safe-to-Post & AI Confidence Summary */}
-      {sub.status !== 'ai_review' && (
-        <div className="readiness-strip">
-          <div className="readiness-stat">
-            <div className="readiness-stat-label">
-              <span>Posting Status</span>
-              <small>
-                {hasBlockingError
-                  ? 'A check could not complete cleanly'
-                  : isSafeToPost
-                    ? 'No unresolved issues found'
-                    : `${blockingCount} issue${blockingCount > 1 ? 's' : ''} must be fixed or overridden`}
-              </small>
-            </div>
-            <strong style={{ color: isSafeToPost ? '#166534' : '#b91c1c' }}>
-              {isSafeToPost ? 'Safe to post' : 'Not safe to post'}
-            </strong>
+      <div className="readiness-strip" role="status">
+        <div className="readiness-stat">
+          <div className="readiness-stat-label">
+            <span>Review status</span>
+            <small>{readinessExplanation(readiness)}</small>
           </div>
-          <div className="readiness-stat">
-            <div className="readiness-stat-label">
-              <span>AI Confidence</span>
-              <small>
-                {isSafeToPost
-                  ? 'Content aligns with guidelines and facts'
-                  : 'Lowered because mistakes or unverified claims were found'}
-              </small>
-            </div>
-            <strong style={{ color: confidenceColor }}>
-              {confidenceTier} ({aiConfidence}%)
-            </strong>
+          <strong style={{ color: readiness.startsWith('approved') ? '#166534' : '#78350f' }}>
+            {readinessLabel(readiness)}
+          </strong>
+        </div>
+        <div className="readiness-stat">
+          <div className="readiness-stat-label">
+            <span>Confidence</span>
+            <small>Heuristic scores are not a calibrated probability of correctness.</small>
           </div>
+          <strong>Unavailable</strong>
+        </div>
+      </div>
+      {!isHistoricalView && sub.status === 'final_approval' && managerOverrides.length > 0 && (
+        <div className="workspace-notice" role="note">
+          <strong>Manager approved with an override</strong>
+          {managerOverrides.map(d => <p key={d.id}>Reason: {d.override_reason || 'No reason recorded.'}</p>)}
+          <strong>Remaining unresolved risks ({openRisks.length})</strong>
+          {openRisks.length > 0 ? (
+            <ul>{openRisks.map(f => <li key={f.id}>{f.passage && f.passage !== '(whole submission)' ? f.passage : 'Applies to the whole draft'} — {f.explanation}</li>)}</ul>
+          ) : <p>No open blocking findings remain on this version.</p>}
+          {openRisks.length > 0 && <p>The Final Reviewer must provide their own override justification to approve these risks.</p>}
+        </div>
+      )}
+      {readiness === 'approved_with_override' && overrideDecisions.length > 0 && (
+        <div className="workspace-notice" role="status">
+          Approved with override. Remaining risks require review. Reason: {overrideDecisions.map(d => d.override_reason || d.comment).filter(Boolean).join('; ')}
         </div>
       )}
 
       {/* Live Async Processing Stepper */}
-      {sub.status === 'ai_review' && (
+      {displayStatus === 'ai_review' && (
         <div className="processing-card" role="status">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
             <strong style={{ color: '#28110f' }}>Reviewing {sub.content_type.toUpperCase()} against {sub.brand_name || user.brand_name}…</strong>
@@ -1005,12 +1008,14 @@ export default function ReviewWorkspace({
           )}
 
           {lensFindings.length === 0 ? (
-            <div className="workspace-notice" style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' }}>
-              {lens === 'brand'
-                ? 'No brand guideline violations detected in this draft.'
-                : lens === 'claim'
-                ? 'No contradicted or unverified external claims detected in this draft.'
-                : 'No actionable violations detected.'}
+            <div className="workspace-notice" role="status">
+              {readiness === 'not_checked'
+                ? 'Not yet checked. Run a review before interpreting findings for this version.'
+                : readiness === 'review_in_progress'
+                ? 'Review in progress. Findings will appear when the check completes.'
+                : readiness === 'review_incomplete'
+                ? 'Review incomplete. Some checks did not finish; retry or inspect the error above.'
+                : 'No actionable findings returned in this view. This does not verify every claim or replace human review.'}
             </div>
           ) : (
             lensFindings.map((f, i) => renderFindingCard(f, i))

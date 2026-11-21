@@ -1042,8 +1042,8 @@ def retrieve_guidelines(
                     )
                     for c in own_chunks
                 ]
-            if target_org and _supabase_configured():
-                # Org has zero uploaded documents on live DB -> return [] so brand check reports missing guidelines cleanly
+            if target_org:
+                # No active documents for this organisation, including in the local store.
                 return []
             return list(DEFAULT_GUIDELINES)
 
@@ -1077,7 +1077,7 @@ def retrieve_guidelines(
             )
         return guidelines
     except Exception as exc:
-        logger.warning("RAG retrieval fell back due to: %s", exc)
+        logger.warning("RAG retrieval failed due to: %s", exc)
         if target_org:
-            return []
+            raise
         return list(DEFAULT_GUIDELINES)

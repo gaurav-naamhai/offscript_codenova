@@ -401,11 +401,11 @@ def verify_brand(
                     passage=sample_passage,
                     location="submission",
                     violation_category="other",
-                    explanation="No brand guidelines were provided by the retrieval interface. Brand verification cannot invent rules in the absence of authoritative guidelines.",
+                    explanation="No active brand guidelines are available for this organisation. Brand verification cannot invent rules without approved guidance.",
                     why_it_matters="Grounding checks in explicit guidelines prevents arbitrary enforcement and protects creator trust.",
                     guideline_document="N/A",
                     guideline_section="N/A",
-                    guideline_excerpt="No guidelines supplied by retrieval layer.",
+                    guideline_excerpt="No active organisation guidelines available.",
                     suggested_fix=None,
                     uncertainty_note="Missing guideline context. A human brand reviewer must inspect this submission manually.",
                 )

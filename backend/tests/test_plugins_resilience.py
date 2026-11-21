@@ -24,14 +24,14 @@ def test_pipeline_catches_exceptions_and_generates_error_flags():
         brand_check_fn=failing_brand_check,
     )
 
-    assert len(degraded) == 3
+    assert len(degraded) == 2
     modules = {d.module: d.error for d in degraded}
     assert modules["retrieval"] == "ConnectionError"
     assert modules["verification"] == "RuntimeError"
-    assert modules["brand_check"] == "ValueError"
+    assert "brand_check" not in modules  # Brand rules cannot be assessed when retrieval failed.
 
     # Explicit failure flags produced, no fixture flags
-    assert len(flags) == 3
+    assert len(flags) == 2
     for flag in flags:
         assert flag.origin == "error"
         assert flag.needs_human is True
@@ -54,11 +54,11 @@ def test_pipeline_catches_malformed_returns_and_generates_error_flags():
         brand_check_fn=lambda c, g: None,
     )
 
-    assert len(degraded) == 3
+    assert len(degraded) == 2
     for d in degraded:
         assert d.error == "TypeError"
 
-    assert len(flags) == 3
+    assert len(flags) == 2
     for flag in flags:
         assert flag.origin == "error"
         assert flag.needs_human is True

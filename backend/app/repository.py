@@ -10,8 +10,24 @@ from app.models import AuditEvent, Comment, Decision, Flag, Submission, VersionS
 MAX_SUBMISSIONS = 40
 
 
+class ConcurrentSubmissionChange(Exception):
+    """A mutation attempted to replace a newer stored submission."""
+
+
 class SubmissionRepository(ABC):
     """Abstract storage interface for brand compliance assets."""
+
+    async def begin_check(self, submission: Submission, expected_version: int, expected_status: str) -> bool:
+        raise NotImplementedError("Atomic check start is required")
+
+    async def complete_check(self, submission: Submission, expected_version: int, job_id: str, flags: List[Flag], snapshot: VersionSnapshot) -> bool:
+        raise NotImplementedError("Atomic check completion is required")
+
+    async def fail_check(self, submission_id: str, version: int, job_id: str, error: str) -> bool:
+        raise NotImplementedError("Atomic check failure is required")
+
+    def update_check_stage(self, submission_id: str, version: int, job_id: str, stage: str) -> None:
+        raise NotImplementedError("Conditional stage update is required")
 
     @abstractmethod
     async def create_submission(self, submission: Submission) -> Submission: ...
@@ -96,7 +112,7 @@ class InMemorySubmissionRepository(SubmissionRepository):
                 ):
                     d.pop(oldest_id, None)
 
-            self._submissions[submission.id] = submission
+            self._submissions[submission.id] = submission.model_copy(deep=True)
             self._snapshots[submission.id] = {}
             self._flags[submission.id] = {submission.version: []}
             self._decisions[submission.id] = []
@@ -106,7 +122,8 @@ class InMemorySubmissionRepository(SubmissionRepository):
 
     async def get_submission(self, submission_id: str) -> Optional[Submission]:
         with self._lock:
-            return self._submissions.get(submission_id)
+            item = self._submissions.get(submission_id)
+            return item.model_copy(deep=True) if item else None
 
     async def list_submissions(
         self, status: Optional[str] = None, org_id: Optional[str] = None
@@ -118,14 +135,52 @@ class InMemorySubmissionRepository(SubmissionRepository):
                 items = [s for s in items if (s.org_id or "inkloom").lower() == norm_org]
             if status:
                 items = [s for s in items if s.status == status]
-            return sorted(items, key=lambda s: s.created_at, reverse=True)
+            return [s.model_copy(deep=True) for s in sorted(items, key=lambda s: s.created_at, reverse=True)]
 
     async def update_submission(self, submission: Submission) -> Submission:
         with self._lock:
-            self._submissions[submission.id] = submission
+            current = self._submissions.get(submission.id)
+            if not current or current.storage_revision != submission.storage_revision:
+                raise ConcurrentSubmissionChange()
+            submission.storage_revision += 1
+            self._submissions[submission.id] = submission.model_copy(deep=True)
             if submission.id in self._flags and submission.version not in self._flags[submission.id]:
                 self._flags[submission.id][submission.version] = []
             return submission
+
+    async def begin_check(self, submission: Submission, expected_version: int, expected_status: str) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission.id)
+            if not current or current.version != expected_version or current.status != expected_status or current.processing_job_id or current.storage_revision != submission.storage_revision:
+                return False
+            submission.storage_revision += 1
+            self._submissions[submission.id] = submission.model_copy(deep=True)
+            return True
+
+    async def complete_check(self, submission: Submission, expected_version: int, job_id: str, flags: List[Flag], snapshot: VersionSnapshot) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission.id)
+            if not current or current.version != expected_version or current.status != 'ai_review' or current.processing_job_id != job_id:
+                return False
+            submission.storage_revision = current.storage_revision + 1
+            self._submissions[submission.id] = submission.model_copy(deep=True)
+            self._flags.setdefault(submission.id, {})[expected_version] = list(flags)
+            self._snapshots.setdefault(submission.id, {})[expected_version] = snapshot
+            return True
+
+    async def fail_check(self, submission_id: str, version: int, job_id: str, error: str) -> bool:
+        with self._lock:
+            current = self._submissions.get(submission_id)
+            if not current or current.version != version or current.status != 'ai_review' or current.processing_job_id != job_id:
+                return False
+            self._submissions[submission_id] = current.model_copy(update={'status': 'draft', 'processing_stage': 'failed', 'processing_error': error, 'processing_job_id': None, 'storage_revision': current.storage_revision + 1})
+            return True
+
+    def update_check_stage(self, submission_id: str, version: int, job_id: str, stage: str) -> None:
+        with self._lock:
+            current = self._submissions.get(submission_id)
+            if current and current.version == version and current.processing_job_id == job_id and current.status == 'ai_review':
+                current.processing_stage = stage
 
     async def set_flags(
         self, submission_id: str, flags: List[Flag], version: Optional[int] = None
@@ -195,6 +250,9 @@ class InMemorySubmissionRepository(SubmissionRepository):
 
     async def save_version_snapshot(self, submission_id: str, snapshot: VersionSnapshot) -> VersionSnapshot:
         with self._lock:
+            current = self._submissions.get(submission_id)
+            if current and snapshot.version == current.version and snapshot.status != current.status:
+                raise ConcurrentSubmissionChange()
             self._snapshots.setdefault(submission_id, {})[snapshot.version] = snapshot
             return snapshot
 

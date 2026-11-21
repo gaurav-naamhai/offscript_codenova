@@ -132,12 +132,14 @@ def run_pipeline(
     # 1. Retrieval (org-isolated Brand RAG)
     _notify("retrieving_guidelines")
     guidelines: List[GuidelineRef] = []
+    retrieval_failed = False
     try:
         raw_guidelines = r_fn(content)
         if not isinstance(raw_guidelines, list) or not all(isinstance(i, GuidelineRef) for i in raw_guidelines):
             raise TypeError("retrieve_guidelines must return list[GuidelineRef]")
         guidelines = raw_guidelines
     except Exception as exc:
+        retrieval_failed = True
         logger.error("Plugin 'retrieval' failed: %s", exc, exc_info=True)
         degraded_modules.append(DegradedModule(module="retrieval", error=type(exc).__name__))
         flags.append(_make_error_flag("retrieval", submission_id, version, now_iso, detail=str(exc)))
@@ -165,7 +167,8 @@ def run_pipeline(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         v_fut = pool.submit(_call_verification, v_fn, content, guidelines, shared_cu)
-        b_fut = pool.submit(_call_brand_check, b_fn, content, guidelines, shared_cu)
+        # An unavailable retrieval service is not an empty brand workspace.
+        b_fut = None if retrieval_failed else pool.submit(_call_brand_check, b_fn, content, guidelines, shared_cu)
 
         try:
             raw_claims = v_fut.result()
@@ -177,15 +180,16 @@ def run_pipeline(
             degraded_modules.append(DegradedModule(module="verification", error=type(exc).__name__))
             flags.append(_make_error_flag("verification", submission_id, version, now_iso, detail=str(exc)))
 
-        try:
-            raw_brands = b_fut.result()
-            if not isinstance(raw_brands, list) or not all(isinstance(i, FlagDraft) for i in raw_brands):
-                raise TypeError("check_brand must return list[FlagDraft]")
-            candidate_drafts.extend(raw_brands)
-        except Exception as exc:
-            logger.error("Plugin 'brand_check' failed: %s", exc, exc_info=True)
-            degraded_modules.append(DegradedModule(module="brand_check", error=type(exc).__name__))
-            flags.append(_make_error_flag("brand_check", submission_id, version, now_iso, detail=str(exc)))
+        if b_fut is not None:
+            try:
+                raw_brands = b_fut.result()
+                if not isinstance(raw_brands, list) or not all(isinstance(i, FlagDraft) for i in raw_brands):
+                    raise TypeError("check_brand must return list[FlagDraft]")
+                candidate_drafts.extend(raw_brands)
+            except Exception as exc:
+                logger.error("Plugin 'brand_check' failed: %s", exc, exc_info=True)
+                degraded_modules.append(DegradedModule(module="brand_check", error=type(exc).__name__))
+                flags.append(_make_error_flag("brand_check", submission_id, version, now_iso, detail=str(exc)))
 
     # 4. AI Flagging Synthesis & Deduplication
     _notify("synthesizing")
