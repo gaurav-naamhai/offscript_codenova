@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import inspect
 import logging
+import re
 from typing import Callable, List, Optional, Tuple
 import uuid
 
@@ -13,6 +14,31 @@ from app.plugins import brand_check, retrieval, verification
 from app.uncertainty import needs_human
 
 logger = logging.getLogger(__name__)
+
+
+def ground_visual_finding(draft: FlagDraft, guidelines: List[GuidelineRef]) -> FlagDraft:
+    """Keep general visual advice separate from evidence-backed brand rules."""
+    text = ' '.join([draft.passage, draft.location, draft.explanation]).lower()
+    topics = [topic for topic, pattern in (
+        ('logo', r'logo|wordmark|clearspace'),
+        ('typography', r'typograph|font|text size|readab'),
+        ('contrast', r'contrast|accessibility'),
+    ) if re.search(pattern, text)]
+    if draft.finding_type != 'brand' or not topics:
+        return draft
+    patterns = {'logo': r'logo|wordmark|clearspace', 'typography': r'typograph|font|text size|readab', 'contrast': r'contrast|accessibility'}
+    cited = draft.guideline_refs or ([draft.guideline_ref] if draft.guideline_ref else [])
+    relevant = [g for g in cited if g in guidelines and all(re.search(patterns[t], g.excerpt.lower()) for t in topics)]
+    if relevant:
+        draft.guideline_ref, draft.guideline_refs = relevant[0], relevant
+        return draft
+    draft.state = 'unclear'
+    draft.guideline_ref, draft.guideline_refs, draft.internal_evidence = None, [], []
+    draft.explanation = 'General visual/accessibility observation — not an established brand-rule violation. ' + draft.explanation
+    draft.uncertainty_note = 'No matching rule was found in the supplied guidance. Visual estimates require human review.'
+    draft.suggested_correction = None
+    draft.suggestion = None
+    return draft
 
 
 def _draft_to_flag(draft: FlagDraft, submission_id: str, version: int, now_iso: str) -> Flag:
@@ -185,7 +211,7 @@ def run_pipeline(
                 raw_brands = b_fut.result()
                 if not isinstance(raw_brands, list) or not all(isinstance(i, FlagDraft) for i in raw_brands):
                     raise TypeError("check_brand must return list[FlagDraft]")
-                candidate_drafts.extend(raw_brands)
+                candidate_drafts.extend(ground_visual_finding(draft, guidelines) for draft in raw_brands)
             except Exception as exc:
                 logger.error("Plugin 'brand_check' failed: %s", exc, exc_info=True)
                 degraded_modules.append(DegradedModule(module="brand_check", error=type(exc).__name__))

@@ -185,6 +185,11 @@ def validate_no_invented_facts(
     if orig and len(cand) > max(int(len(orig) * 2.4), len(orig) + 140):
         return False, "Anti-fabrication guard: suggestion expanded significantly beyond minimal intent-preserving scope."
 
+    # Short qualitative product benefits are factual additions too. Do not let
+    # generic marketing language bypass guards aimed only at numbers/entities.
+    benefit = re.search(r"\b(?:helps?\s+you|achieve\w*|improves?|boosts?|enhances?|cures?|prevents?|guarantees?)\b[^.!?]*", cand, re.I)
+    if benefit and benefit.group(0).lower() not in grounded_corpus:
+        return False, "Suggestion adds an unsupported product benefit; request a human edit."
     return True, None
 
 

@@ -281,11 +281,16 @@ def compile_brand_constitution(
                 if q not in preferred_terms:
                     preferred_terms.append(q)
 
-        if in_fact_block or re.match(r"^(?:[-*•]\s*)?(?:approved fact|fact|verified)\s*:", low):
+        prohibition = bool(re.search(r"\b(?:do not|don't|must not|never|prohibit(?:ed)?|forbidden)\b", low))
+        if prohibition:
+            # Keep the whole negative rule; extracting its number as a fact reverses its meaning.
+            if line not in forbidden_terms:
+                forbidden_terms.append(line)
+        if not prohibition and (in_fact_block or re.match(r"^(?:[-*•]\s*)?(?:approved fact|fact|verified)\s*:", low)):
             cleaned_fact = re.sub(r"^[-*•]\s*", "", line).strip()
             if len(cleaned_fact) >= 12 and cleaned_fact not in approved_facts:
                 approved_facts.append(cleaned_fact)
-        elif re.search(r"\b\d+(?:\.\d+)?%|\bfounded\b|\bcertified\b|\bsla\b|\borg\b|\b100%\b", low) and len(line) <= 220:
+        elif not prohibition and re.search(r"\b\d+(?:\.\d+)?%|\bfounded\b|\bcertified\b|\bsla\b|\borg\b|\b100%\b", low) and len(line) <= 220:
             cleaned_fact = re.sub(r"^[-*•]\s*", "", line).strip()
             if len(cleaned_fact) >= 16 and cleaned_fact not in approved_facts and not in_forbidden_block:
                 approved_facts.append(cleaned_fact)

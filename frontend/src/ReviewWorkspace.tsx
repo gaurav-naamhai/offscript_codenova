@@ -450,7 +450,9 @@ export default function ReviewWorkspace({
         : null
 
     const modeLabel =
-      f.evidence_mode === 'combined'
+      f.explanation.startsWith('General visual/accessibility observation')
+        ? 'Human visual review'
+        : f.evidence_mode === 'combined'
         ? 'Combined Evidence'
         : f.evidence_mode === 'external_only'
         ? 'External Evidence'
@@ -467,7 +469,7 @@ export default function ReviewWorkspace({
         <div className="finding-header-bar">
           <div className="finding-header-left">
             {index != null && <span className="finding-title-badge">Finding {index + 1}</span>}
-            <span className="finding-type-pill">{f.finding_type === 'brand' ? 'Brand Guideline' : 'External Fact / Claim'}</span>
+            <span className="finding-type-pill">{f.explanation.startsWith('General visual/accessibility observation') ? 'Visual / accessibility observation' : f.finding_type === 'brand' ? 'Brand Guideline' : 'External Fact / Claim'}</span>
             <span className={`finding-state-pill ${f.state}`}>{label(f.state)}</span>
             <span className="finding-mode-pill">{modeLabel}</span>
           </div>
@@ -996,9 +998,9 @@ export default function ReviewWorkspace({
             </button>
           </div>
 
-          {flags.some(f => f.origin === 'error') && (
+          {displayStatus !== 'ai_review' && flags.some(f => f.origin === 'error') && (
             <div className="stale-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-              <span>One or more automated checks encountered an error.</span>
+              <span>Review incomplete. Findings from completed checks remain visible; failed checks have not verified this draft. Retry runs a new check on this saved submission.</span>
               {(user.role === 'creator' || user.role === 'manager') && (
                 <button type="button" className="btn-recheck" onClick={() => void handleCheck(true)}>
                   Retry check
