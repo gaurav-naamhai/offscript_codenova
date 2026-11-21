@@ -302,7 +302,7 @@ def create_app(
         if org_id == "brightleaf":
             seeds = [
                 (
-                    "Spring Cold-Pressed Tea Launch",
+                    "[Demo] Spring Cold-Pressed Tea Launch",
                     "Organic beverage shoppers",
                     "Marketing email",
                     "Drafting launch email for BrightLeaf Organics botanical teas.",
@@ -312,7 +312,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Weekend Flash Promo Copy",
+                    "[Demo] Weekend Flash Promo Copy",
                     "Newsletter subscribers",
                     "Social media",
                     "Checking discount cap and health claim accuracy before Manager sign-off.",
@@ -322,7 +322,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Q4 Sustainability & Packaging Brief",
+                    "[Demo] Q4 Sustainability & Packaging Brief",
                     "Retail partners",
                     "Website",
                     "Approved product overview aligned with BrightLeaf Organics guidelines.",
@@ -335,7 +335,7 @@ def create_app(
         elif org_id == "nike":
             seeds = [
                 (
-                    "Air Max Seasonal Drop Teaser",
+                    "[Demo] Air Max Seasonal Drop Teaser",
                     "Runners & athletes",
                     "Social media",
                     "Draft campaign copy for upcoming footwear release.",
@@ -345,7 +345,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Pro Training Banner Claim Check",
+                    "[Demo] Pro Training Banner Claim Check",
                     "Performance athletes",
                     "Website",
                     "Verifying performance superlative and brand voice rules.",
@@ -355,7 +355,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Just Do It Heritage Campaign",
+                    "[Demo] Just Do It Heritage Campaign",
                     "Global community",
                     "Marketing email",
                     "Approved brand storytelling piece.",
@@ -368,7 +368,7 @@ def create_app(
         else:
             seeds = [
                 (
-                    "Summer Campaign Announcement",
+                    "[Demo] Summer Campaign Announcement",
                     "Small business owners",
                     "Marketing email",
                     "Reviewing new promotional email draft for tone consistency and claim accuracy.",
@@ -378,7 +378,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Enterprise SLA Performance Sheet",
+                    "[Demo] Enterprise SLA Performance Sheet",
                     "Enterprise IT buyers",
                     "Website",
                     "Checking uptime and performance claims against verified SLA standards.",
@@ -388,7 +388,7 @@ def create_app(
                     False,
                 ),
                 (
-                    "Q4 Brand Governance Overview",
+                    "[Demo] Q4 Brand Governance Overview",
                     "Brand & legal stakeholders",
                     "Social media",
                     "Approved executive summary of compliance achievements.",
