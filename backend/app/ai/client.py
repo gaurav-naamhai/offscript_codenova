@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import threading
 from typing import Any, Callable, Dict, Optional, Type, TypeVar
 from pydantic import BaseModel
 
@@ -18,6 +19,51 @@ from app.config import Settings
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+_AI_SLOTS = threading.BoundedSemaphore(2)
+_COOLDOWN_LOCK = threading.Lock()
+_COOLDOWN_UNTIL = 0.0
+
+
+def provider_retry_delay(exc: Exception) -> float:
+    """Read numeric Retry-After or Google's retryDelay without exposing response bodies."""
+    headers = getattr(getattr(exc, 'response', None), 'headers', {}) or {}
+    raw = headers.get('Retry-After') or headers.get('retry-after')
+    if raw is None:
+        match = re.search(r'(?:retryDelay[\"\s:]+|retry in\s+)(\d+(?:\.\d+)?)s?', str(exc), re.I)
+        raw = match.group(1) if match else 30
+    try:
+        return max(1.0, min(float(raw), 3600.0))
+    except (ValueError, TypeError):
+        return 30.0
+
+
+def bounded_generate(call: Callable, **kwargs):
+    """Limit process-wide calls and fail fast during a provider cooldown."""
+    global _COOLDOWN_UNTIL
+    started = time.monotonic()
+    if not _AI_SLOTS.acquire(timeout=5):
+        raise GeminiAPIError('AI service is busy. Please retry shortly.', status_code=503)
+    try:
+        with _COOLDOWN_LOCK:
+            remaining = _COOLDOWN_UNTIL - time.monotonic()
+        if remaining > 0:
+            raise GeminiQuotaError(f'AI service is temporarily busy or at its request limit. Retry in about {int(remaining) + 1} seconds.')
+        try:
+            return call(**kwargs)
+        except Exception as exc:
+            code = getattr(exc, 'code', None) or getattr(exc, 'status_code', None)
+            if str(code) in {'429', '503'}:
+                delay = provider_retry_delay(exc)
+                with _COOLDOWN_LOCK:
+                    _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.monotonic() + delay)
+                logger.warning('AI provider unavailable status=%s retry_delay_seconds=%s', code, delay)
+                message = 'AI request limit reached.' if str(code) == '429' else 'AI service is busy.'
+                raise GeminiQuotaError(f'{message} Retry in about {int(delay) + 1} seconds.') from None
+            raise
+    finally:
+        logger.info('AI call elapsed_seconds=%.3f', time.monotonic() - started)
+        _AI_SLOTS.release()
 
 
 # ============================================================================
@@ -113,9 +159,8 @@ class GeminiClient:
                     http_options=client_http_options,
                 )
                 logger.info(
-                    "GeminiClient initialized in LIVE MODE for model '%s' (Key: %s, API: v1beta)",
+                    "GeminiClient initialized in LIVE MODE for model '%s' (API: v1beta)",
                     self.model,
-                    self.masked_api_key(),
                 )
             except Exception as exc:
                 raise GeminiConfigurationError(f"Failed to initialize Google GenAI SDK: {exc}") from exc
@@ -200,7 +245,7 @@ class GeminiClient:
         config_args: Dict[str, Any] = {
             "response_mime_type": "application/json",
             "response_schema": response_schema,
-            "http_options": {"api_version": "v1beta"},
+            "http_options": {"api_version": "v1beta", "timeout": 45000, "retry_options": {"attempts": 1}},
         }
         if system_instruction:
             config_args["system_instruction"] = system_instruction
@@ -220,10 +265,10 @@ class GeminiClient:
             response = None
             for model_idx, active_model in enumerate(models_to_try):
                 try:
-                    max_attempts = 3
+                    max_attempts = 2
                     for attempt in range(1, max_attempts + 1):
                         try:
-                            response = self._client.models.generate_content(
+                            response = bounded_generate(self._client.models.generate_content,
                                 model=active_model,
                                 contents=contents,
                                 config=config,
@@ -244,10 +289,10 @@ class GeminiClient:
                             )
                             if is_server_error and attempt < max_attempts:
                                 logger.warning(
-                                    "Gemini API server error (attempt %d/%d): %s. Retrying in 1s...",
+                                    "Gemini API server error (attempt %d/%d), status=%s. Retrying in 1s...",
                                     attempt,
                                     max_attempts,
-                                    exc,
+                                    code_int,
                                 )
                                 time.sleep(1)
                                 continue
@@ -292,6 +337,8 @@ class GeminiClient:
         except TimeoutError as exc:
             raise GeminiTimeoutError("Gemini API call timed out.") from exc
 
+        except GeminiError:
+            raise
         except Exception as exc:
             # Handle other client or network errors
             exc_name = type(exc).__name__

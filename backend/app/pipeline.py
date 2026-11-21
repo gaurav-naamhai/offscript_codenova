@@ -16,7 +16,7 @@ from app.uncertainty import needs_human
 logger = logging.getLogger(__name__)
 
 
-def ground_visual_finding(draft: FlagDraft, guidelines: List[GuidelineRef]) -> FlagDraft:
+def ground_visual_finding(draft: FlagDraft, guidelines: List[GuidelineRef]) -> Optional[FlagDraft]:
     """Keep general visual advice separate from evidence-backed brand rules."""
     text = ' '.join([draft.passage, draft.location, draft.explanation]).lower()
     topics = [topic for topic, pattern in (
@@ -32,6 +32,9 @@ def ground_visual_finding(draft: FlagDraft, guidelines: List[GuidelineRef]) -> F
     if relevant:
         draft.guideline_ref, draft.guideline_refs = relevant[0], relevant
         return draft
+    if draft.state == 'aligned' and not draft.uncertainty_note:
+        # An unsupported positive visual summary adds no actionable observation.
+        return None
     draft.state = 'unclear'
     draft.guideline_ref, draft.guideline_refs, draft.internal_evidence = None, [], []
     draft.explanation = 'General visual/accessibility observation — not an established brand-rule violation. ' + draft.explanation
@@ -70,13 +73,24 @@ def _make_error_flag(
 ) -> Flag:
     finding_type = "claim" if module == "verification" else "brand"
     state = "insufficient_evidence" if module == "verification" else "unclear"
-    suffix = f" ({detail})" if detail else ""
+    # Provider response bodies can contain large diagnostics. Return only an
+    # actionable summary; server-side events retain module/type information.
+    if detail and re.search(r'429|RESOURCE_EXHAUSTED|quota|request limit', detail, re.I):
+        safe_detail = 'AI request limit reached. Wait before retrying.'
+    elif detail and re.search(r'503|UNAVAILABLE|service is busy', detail, re.I):
+        safe_detail = 'AI service is busy. Please retry shortly.'
+    else:
+        safe_detail = 'This automated check could not complete.'
+    delay = re.search(r'Retry in about \d+ seconds', detail or '', re.I)
+    if delay:
+        safe_detail += ' ' + delay.group(0) + '.'
+    suffix = f" ({safe_detail})"
     return Flag(
         id=str(uuid.uuid4()), submission_id=submission_id, version=version,
         finding_type=finding_type, state=state, passage="(whole submission)", location="submission",
         explanation=f"Automated check failed ({module}){suffix}. Retry or review manually before publication.",
         why_it_matters="System failure during compliance check requires human intervention or retry.",
-        guideline_ref=None, guideline_refs=[], external_sources=[], uncertainty_note=detail,
+        guideline_ref=None, guideline_refs=[], external_sources=[], uncertainty_note=safe_detail,
         suggested_correction=None, origin="error", status="open", comments=[],
         needs_human=True, created_at=now_iso,
         evidence_mode="insufficient_evidence",
@@ -185,6 +199,13 @@ def run_pipeline(
             shared_cu = understand_content(content)
         except Exception as exc:
             logger.warning("Shared ContentUnderstanding step degraded: %s", exc)
+            from app.ai.client import GeminiError
+            if isinstance(exc, GeminiError):
+                degraded_modules.append(DegradedModule(module='content_understanding', error=type(exc).__name__))
+                flags.append(_make_error_flag('content_understanding', submission_id, version, now_iso, detail=str(exc)))
+                # Both downstream modules require this shared interpretation.
+                # Avoid independently repeating the failed model request twice.
+                return flags, degraded_modules
             shared_cu = None
 
     # 3. Execute Verification & Brand Check concurrently
@@ -211,7 +232,7 @@ def run_pipeline(
                 raw_brands = b_fut.result()
                 if not isinstance(raw_brands, list) or not all(isinstance(i, FlagDraft) for i in raw_brands):
                     raise TypeError("check_brand must return list[FlagDraft]")
-                candidate_drafts.extend(ground_visual_finding(draft, guidelines) for draft in raw_brands)
+                candidate_drafts.extend(grounded for draft in raw_brands if (grounded := ground_visual_finding(draft, guidelines)) is not None)
             except Exception as exc:
                 logger.error("Plugin 'brand_check' failed: %s", exc, exc_info=True)
                 degraded_modules.append(DegradedModule(module="brand_check", error=type(exc).__name__))

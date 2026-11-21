@@ -65,7 +65,7 @@ function FilePicker({ format, file, onFile, error }: { format: 'Image' | 'PDF'; 
         <input ref={input} className="sr-only" type="file" accept={format === 'Image' ? 'image/png,image/jpeg,image/webp' : 'application/pdf,.pdf'} onChange={selectFile} aria-label={`Choose ${format} file`} tabIndex={-1} />
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <p className="field-hint">Files are processed asynchronously so large PDFs and images never time out.</p>
+      <p className="field-hint">Supported: pasted text, PNG, JPEG, WebP and PDF. Word files are not supported. Reviews can be delayed or incomplete when services are unavailable.</p>
     </div>
   )
 }

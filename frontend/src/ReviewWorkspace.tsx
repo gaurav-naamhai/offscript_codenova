@@ -72,6 +72,7 @@ export default function ReviewWorkspace({
   const [liveStatus, setLiveStatus] = useState<SubmissionStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
+  const checkInFlight = useRef(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -276,6 +277,8 @@ export default function ReviewWorkspace({
   }
 
   async function handleCheck(retry = false) {
+    if (checkInFlight.current) return
+    checkInFlight.current = true
     setBusy(retry ? 'Retrying compliance review…' : 'Starting compliance review…')
     setError('')
     setNotice('')
@@ -291,6 +294,7 @@ export default function ReviewWorkspace({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start compliance check.')
     } finally {
+      checkInFlight.current = false
       setBusy('')
     }
   }
@@ -1002,7 +1006,7 @@ export default function ReviewWorkspace({
             <div className="stale-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
               <span>Review incomplete. Findings from completed checks remain visible; failed checks have not verified this draft. Retry runs a new check on this saved submission.</span>
               {(user.role === 'creator' || user.role === 'manager') && (
-                <button type="button" className="btn-recheck" onClick={() => void handleCheck(true)}>
+                <button type="button" className="btn-recheck" onClick={() => void handleCheck(true)} disabled={!!busy}>
                   Retry check
                 </button>
               )}
