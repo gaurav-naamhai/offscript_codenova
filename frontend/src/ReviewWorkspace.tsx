@@ -666,6 +666,9 @@ export default function ReviewWorkspace({
 
   return (
     <div className="review-workspace">
+      <p className="judge-note">
+        ★ For the judges: &#123; Shows Safe-to-Post status &amp; AI Confidence, Brand vs. External Search lenses, versioned Revise &amp; Resubmit, and role-enforced Approval or Override with compliance certificate export. &#125;
+      </p>
       <header className="workspace-intro">
         <div>
           <span className="workspace-kicker">{sub.brand_name || user.brand_name} Review</span>

@@ -1,0 +1,26 @@
+BrightLeaf Organics — Official Brand Guidelines (v1.0)
+
+1. Brand Identity & Approved Facts
+- Official brand name: Always write "BrightLeaf Organics" (capital B, capital L). Never write "Brightleaf" or "Bright Leaf".
+- Founded in 2019 in Portland, Oregon.
+- Core products: Organic cold-pressed teas, botanical sparkling waters, and plant-based energy infusions.
+- Sustainability fact: All bottles are made from 100% post-consumer recycled (PCR) glass or aluminum.
+- Certification: USDA Organic certified across all beverage lines.
+
+2. Promotions & Discount Rules
+- Maximum promotional discount: Promotional discounts must never exceed 20% off retail price on any public campaign, email, or social post.
+- Never advertise "free forever", "99% off", or "clearance blowout" discounts.
+- Every promotional offer must state a clear expiration date or "while supplies last."
+
+3. Health, Eco & Product Claims
+- Never claim that BrightLeaf beverages "cure", "treat", or "prevent" any medical condition or disease.
+- Never use unverified superlatives such as "100% zero carbon emissions" or "#1 doctor-recommended beverage in the world."
+- Approved phrasing: Use "crafted with USDA Organic botanicals" and "packaged in 100% recycled materials."
+
+4. Tone & Voice
+- Warm, transparent, grounded, and optimistic.
+- Avoid aggressive urgency ("ACT NOW OR MISS OUT FOREVER!!!"), all-caps shouting, or disparaging competing beverage brands.
+
+5. Visual & Accessibility Standards
+- Primary brand colors: Forest Leaf (#2E5A36), Warm Cream (#F5F1E8), and Charcoal Text (#1F2421).
+- All promotional banners and text overlays must maintain at least WCAG AA contrast (4.5:1 for normal text).

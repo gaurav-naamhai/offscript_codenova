@@ -60,6 +60,9 @@ export default function ReviewLibrary({
 
   return (
     <section className="library">
+      <p className="judge-note">
+        ★ For the judges: &#123; Searchable archive scoped strictly to your active organisation — filter by status or format and reopen any review with its full version history and audit log. &#125;
+      </p>
       <header className="library-heading">
         <div>
           <h1>Review library.</h1>

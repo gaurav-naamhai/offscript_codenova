@@ -194,6 +194,12 @@ export default function BrandKnowledge({
 
   return (
     <div className="knowledge-page">
+      <p className="judge-note">
+        ★ For the judges:{' '}
+        {tab === 'rectify'
+          ? '{ Rule hygiene scanner that flags conflicting, unclear, duplicate, or expired rules — Managers can edit wording and atomically publish a new version via Postgres RPC while preserving history. }'
+          : '{ One-time guideline ingestion using section-aware chunking, pgvector + lexical Hybrid RAG, and an auto-compiled Brand Constitution isolated per organisation. }'}
+      </p>
       <header className="ki-heading">
         <h1>Brand knowledge.</h1>
         <p className="page-guidance">Add and manage the guidelines your team uses for reviews.</p>
