@@ -131,6 +131,9 @@ export default function AuthModal({ inline = false, currentUser, onAuthenticated
           <p className="auth-subtitle">
             Each organisation keeps its own brand guidelines, drafts, and role permissions isolated.
           </p>
+          <p className="auth-judge-note">
+            <strong>★ For the judges:</strong> &#123; For judging convenience, all demo role accounts (Creator, Manager, and Final Reviewer) across BrightLeaf, Nike, and Inkloom AI are kept open with one-click access — switch between them anytime to test RBAC, approval separation of duties, and strict organisation isolation, or use Email Sign In / New Organisation for standard auth. &#125;
+          </p>
         </div>
         {onClose && currentUser && (
           <button type="button" className="auth-close" onClick={onClose} aria-label="Close sign in">

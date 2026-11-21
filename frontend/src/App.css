@@ -271,6 +271,16 @@
 .judge-note.dashboard-judge-note {
   margin: 14px 25px 0;
 }
+.auth-judge-note {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f3edf7;
+  border: 1px solid #d7bbed;
+  color: #3d251e;
+  font-size: 13px;
+  line-height: 1.45;
+}
 
 @media (max-width: 760px) {
   .auth-account-grid { grid-template-columns: 1fr; }
