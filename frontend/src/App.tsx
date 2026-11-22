@@ -581,41 +581,62 @@ function App() {
           onSearch={() => setSearchOpen(true)}
           onOpenAuth={() => setAuthModalOpen(true)}
         />
-        {showWakeBanner && (
-          <div
-            className={`backend-wakeup-banner ${backendPhase === 'ready' ? 'ready' : ''}`}
-            role="status"
-            aria-live="polite"
-          >
-            <div className="backend-wakeup-top">
-              <strong>
-                {backendPhase === 'ready'
-                  ? `Backend connected (${wakeLatencyMs != null ? `${(wakeLatencyMs / 1000).toFixed(1)}s` : 'ready'})`
-                  : backendPhase === 'authenticating'
-                    ? 'Backend awake — verifying saved session…'
-                    : 'Checking server availability…'}
-              </strong>
-              <div className="backend-wakeup-meta">
-                {backendPhase === 'waking' && (
-                  <>
-                    <span>{wakeElapsedSec}s elapsed</span>
-                    <span>•</span>
-                    <span>Live /health ping #{wakePingCount}</span>
-                  </>
-                )}
-                {backendPhase === 'ready' && (
-                  <button
-                    type="button"
-                    className="sidebar-mini-btn ghost"
-                    onClick={() => setShowWakeBanner(false)}
-                  >
-                    Dismiss
-                  </button>
-                )}
+        {showWakeBanner && (() => {
+          const wakePct =
+            backendPhase === 'ready'
+              ? 100
+              : backendPhase === 'authenticating'
+                ? 96
+                : Math.min(92, Math.max(6, Math.round((wakeElapsedSec / 40) * 92)))
+          return (
+            <div
+              className={`backend-wakeup-banner ${backendPhase === 'ready' ? 'ready' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              <div className="backend-wakeup-top">
+                <strong>
+                  {backendPhase === 'ready'
+                    ? `Backend connected (${wakeLatencyMs != null ? `${(wakeLatencyMs / 1000).toFixed(1)}s` : 'ready'}) — live workspace synced`
+                    : backendPhase === 'authenticating'
+                      ? 'Backend awake — verifying session & syncing workspace…'
+                      : 'Waking up Render backend (takes approx. 30–40 seconds to load)…'}
+                </strong>
+                <div className="backend-wakeup-meta">
+                  {backendPhase === 'waking' && (
+                    <>
+                      <span>
+                        {wakeElapsedSec < 40
+                          ? `~${40 - wakeElapsedSec}s est. remaining`
+                          : 'Finalizing startup…'}
+                      </span>
+                      <span>•</span>
+                      <span>{wakePct}% loaded</span>
+                      <span>•</span>
+                      <span>{wakeElapsedSec}s elapsed</span>
+                      <span>•</span>
+                      <span>Live /health ping #{wakePingCount}</span>
+                    </>
+                  )}
+                  {backendPhase === 'ready' && (
+                    <button
+                      type="button"
+                      className="sidebar-mini-btn ghost"
+                      onClick={() => setShowWakeBanner(false)}
+                    >
+                      Dismiss
+                    </button>
+                  )}
+                </div>
               </div>
+              {backendPhase !== 'ready' && (
+                <div className="backend-wakeup-track" aria-hidden="true">
+                  <div className="backend-wakeup-fill" style={{ width: `${wakePct}%` }} />
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          )
+        })()}
         {error && (
           <div className="storage-error" role="alert" style={{ margin: '16px 25px 0' }}>
             {error}
